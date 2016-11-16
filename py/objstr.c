@@ -822,7 +822,7 @@ STATIC mp_obj_t str_rstrip(size_t n_args, const mp_obj_t *args) {
 }
 
 #if MICROPY_PY_BUILTINS_STR_CENTER
-STATIC mp_obj_t str_center(mp_obj_t str_in, mp_obj_t width_in) {
+STATIC mp_obj_t str_center(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar=' ') {
     GET_STR_DATA_LEN(str_in, str, str_len);
     mp_uint_t width = mp_obj_get_int(width_in);
     if (str_len >= width) {
@@ -831,9 +831,43 @@ STATIC mp_obj_t str_center(mp_obj_t str_in, mp_obj_t width_in) {
 
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, ' ', width);
+    memset(vstr.buf, fillchar, width);
     int left = (width - str_len) / 2;
     memcpy(vstr.buf + left, str, str_len);
+    return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
+}
+#endif
+
+
+#if MICROPY_PY_BUILTINS_STR_LJUST
+STATIC mp_obj_t str_ljust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar=' ') {
+    GET_STR_DATA_LEN(str_in, str, str_len);
+    mp_uint_t width = mp_obj_get_int(width_in);
+    if (str_len >= width) {
+        return str_in;
+    }
+
+    vstr_t vstr;
+    vstr_init_len(&vstr, width);
+    memset(vstr.buf, fillchar, width);
+    int left = width - str_len;
+    memcpy(vstr.buf + left, str, str_len);
+    return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
+}
+#endif
+
+#if MICROPY_PY_BUILTINS_STR_RJUST
+STATIC mp_obj_t str_rjust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar=' ') {
+    GET_STR_DATA_LEN(str_in, str, str_len);
+    mp_uint_t width = mp_obj_get_int(width_in);
+    if (str_len >= width) {
+        return str_in;
+    }
+
+    vstr_t vstr;
+    vstr_init_len(&vstr, width);
+    memset(vstr.buf, fillchar, width);
+    memcpy(vstr.buf, str, str_len);
     return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
 }
 #endif
