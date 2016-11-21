@@ -831,7 +831,7 @@ STATIC mp_obj_t str_center(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar
 
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_type_str()fillchar, width);
+    memset(vstr.buf, mp_obj_get_int(fillchar), width);
     int left = (width - str_len) / 2;
     memcpy(vstr.buf + left, str, str_len);
     return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
@@ -849,7 +849,7 @@ STATIC mp_obj_t str_ljust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar)
 
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_type_str()fillchar, width);
+    memset(vstr.buf, mp_obj_get_int(fillchar), width);
     int left = width - str_len;
     memcpy(vstr.buf + left, str, str_len);
     return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
@@ -866,7 +866,7 @@ STATIC mp_obj_t str_rjust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar)
 
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_type_str()fillchar, width);
+    memset(vstr.buf, mp_obj_get_int(fillchar), width);
     memcpy(vstr.buf, str, str_len);
     return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
 }
@@ -1899,6 +1899,12 @@ MP_DEFINE_CONST_FUN_OBJ_KW(str_splitlines_obj, 1, str_splitlines);
 #endif
 #if MICROPY_PY_BUILTINS_STR_CENTER
 MP_DEFINE_CONST_FUN_OBJ_2(str_center_obj, str_center);
+#endif
+#if MICROPY_PY_BUILTINS_STR_LJUST
+MP_DEFINE_CONST_FUN_OBJ_2(str_ljust_obj, str_ljust);
+#endif
+#if MICROPY_PY_BUILTINS_STR_RJUST
+MP_DEFINE_CONST_FUN_OBJ_2(str_rjust_obj, str_rjust);
 #endif
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_rsplit_obj, 1, 3, str_rsplit);
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_startswith_obj, 2, 3, str_startswith);
