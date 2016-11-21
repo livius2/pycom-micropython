@@ -1898,13 +1898,13 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_split_obj, 1, 3, mp_obj_str_split);
 MP_DEFINE_CONST_FUN_OBJ_KW(str_splitlines_obj, 1, str_splitlines);
 #endif
 #if MICROPY_PY_BUILTINS_STR_CENTER
-MP_DEFINE_CONST_FUN_OBJ_2(str_center_obj, str_center);
+MP_DEFINE_CONST_FUN_OBJ_3(str_center_obj, str_center);
 #endif
 #if MICROPY_PY_BUILTINS_STR_LJUST
-MP_DEFINE_CONST_FUN_OBJ_2(str_ljust_obj, str_ljust);
+MP_DEFINE_CONST_FUN_OBJ_3(str_ljust_obj, str_ljust);
 #endif
 #if MICROPY_PY_BUILTINS_STR_RJUST
-MP_DEFINE_CONST_FUN_OBJ_2(str_rjust_obj, str_rjust);
+MP_DEFINE_CONST_FUN_OBJ_3(str_rjust_obj, str_rjust);
 #endif
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_rsplit_obj, 1, 3, str_rsplit);
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_startswith_obj, 2, 3, str_startswith);
