@@ -822,53 +822,89 @@ STATIC mp_obj_t str_rstrip(size_t n_args, const mp_obj_t *args) {
 }
 
 #if MICROPY_PY_BUILTINS_STR_CENTER
-STATIC mp_obj_t str_center(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar) {
-    GET_STR_DATA_LEN(str_in, str, str_len);
-    mp_uint_t width = mp_obj_get_int(width_in);
-    if (str_len >= width) {
-        return str_in;
-    }
-
-    vstr_t vstr;
-    vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_obj_get_int(fillchar), width);
-    int left = (width - str_len) / 2;
-    memcpy(vstr.buf + left, str, str_len);
-    return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
+STATIC mp_obj_t str_center(size_t n_args, const mp_obj_t *args) {
+	//declaration have already check about arguments count
+	//if ((n_args<2) || (n_args>3)) {
+	//	mp_raise_TypeError("wrong number of arguments");
+	//}
+	GET_STR_DATA_LEN(args[0], str, str_len);
+	mp_uint_t width = mp_obj_get_int(args[1]);
+	if (str_len >= width) {
+		return args[0];
+	}
+	int fillcharint = 32;
+	if (n_args==3) {
+		GET_STR_DATA_LEN(args[2], fillcharstr, fillchar_len);
+		if (fillchar_len!=1) {
+			mp_raise_ValueError("fillchar must be 1 char length");
+		}
+		fillcharint = (int)((const char *)fillcharstr)[0];
+	}
+	
+	vstr_t vstr;
+	vstr_init_len(&vstr, width);
+	memset(vstr.buf, fillcharint, width);
+	int left = (width - str_len) / 2;
+	memcpy(vstr.buf + left, str, str_len);
+	return mp_obj_new_str_from_vstr(mp_obj_get_type(args[0]), &vstr);
 }
 #endif
 
 
 #if MICROPY_PY_BUILTINS_STR_LJUST
-STATIC mp_obj_t str_ljust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar) {
-    GET_STR_DATA_LEN(str_in, str, str_len);
-    mp_uint_t width = mp_obj_get_int(width_in);
-    if (str_len >= width) {
-        return str_in;
-    }
-
+STATIC mp_obj_t str_ljust(size_t n_args, const mp_obj_t *args) {
+	//declaration have already check about arguments count
+	//if ((n_args<2) || (n_args>3)) {
+	//	mp_raise_TypeError("wrong number of arguments");
+	//}
+	GET_STR_DATA_LEN(args[0], str, str_len);
+	mp_uint_t width = mp_obj_get_int(args[1]);
+	if (str_len >= width) {
+		return args[0];
+	}
+	int fillcharint = 32;
+	if (n_args==3) {
+		GET_STR_DATA_LEN(args[2], fillcharstr, fillchar_len);
+		if (fillchar_len!=1) {
+			mp_raise_ValueError("fillchar must be 1 char length");
+		}
+		fillcharint = (int)((const char *)fillcharstr)[0];
+	}
+	
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_obj_get_int(fillchar), width);
+    memset(vstr.buf, fillcharint, width);
     int left = width - str_len;
     memcpy(vstr.buf + left, str, str_len);
-    return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
+    return mp_obj_new_str_from_vstr(mp_obj_get_type(args[0]), &vstr);
 }
 #endif
 
 #if MICROPY_PY_BUILTINS_STR_RJUST
-STATIC mp_obj_t str_rjust(mp_obj_t str_in, mp_obj_t width_in, mp_obj_t fillchar) {
-    GET_STR_DATA_LEN(str_in, str, str_len);
-    mp_uint_t width = mp_obj_get_int(width_in);
-    if (str_len >= width) {
-        return str_in;
-    }
-
+STATIC mp_obj_t str_rjust(size_t n_args, const mp_obj_t *args) {
+	//declaration have already check about arguments count
+	//if ((n_args<2) || (n_args>3)) {
+	//	mp_raise_TypeError("wrong number of arguments");
+	//}
+	GET_STR_DATA_LEN(args[0], str, str_len);
+	mp_uint_t width = mp_obj_get_int(args[1]);
+	if (str_len >= width) {
+		return args[0];
+	}
+	int fillcharint = 32;
+	if (n_args==3) {
+		GET_STR_DATA_LEN(args[2], fillcharstr, fillchar_len);
+		if (fillchar_len!=1) {
+			mp_raise_ValueError("fillchar must be 1 char length");
+		}
+		fillcharint = (int)((const char *)fillcharstr)[0];
+	}
+	
     vstr_t vstr;
     vstr_init_len(&vstr, width);
-    memset(vstr.buf, mp_obj_get_int(fillchar), width);
+    memset(vstr.buf, fillcharint, width);
     memcpy(vstr.buf, str, str_len);
-    return mp_obj_new_str_from_vstr(mp_obj_get_type(str_in), &vstr);
+    return mp_obj_new_str_from_vstr(mp_obj_get_type(args[0]), &vstr);
 }
 #endif
 
@@ -1898,13 +1934,13 @@ MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_split_obj, 1, 3, mp_obj_str_split);
 MP_DEFINE_CONST_FUN_OBJ_KW(str_splitlines_obj, 1, str_splitlines);
 #endif
 #if MICROPY_PY_BUILTINS_STR_CENTER
-MP_DEFINE_CONST_FUN_OBJ_3(str_center_obj, str_center);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_center_obj, 2, 3, str_center);
 #endif
 #if MICROPY_PY_BUILTINS_STR_LJUST
-MP_DEFINE_CONST_FUN_OBJ_3(str_ljust_obj, str_ljust);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_ljust_obj, 2, 3, str_ljust);
 #endif
 #if MICROPY_PY_BUILTINS_STR_RJUST
-MP_DEFINE_CONST_FUN_OBJ_3(str_rjust_obj, str_rjust);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_rjust_obj, 2, 3, str_rjust);
 #endif
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_rsplit_obj, 1, 3, str_rsplit);
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(str_startswith_obj, 2, 3, str_startswith);
