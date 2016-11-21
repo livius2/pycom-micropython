@@ -625,17 +625,17 @@ typedef double mp_float_t;
 
 // Whether str.center() method provided
 #ifndef MICROPY_PY_BUILTINS_STR_CENTER
-#define MICROPY_PY_BUILTINS_STR_CENTER (0)
+#define MICROPY_PY_BUILTINS_STR_CENTER (1)
 #endif
 
 // Whether str.ljust() method provided
 #ifndef MICROPY_PY_BUILTINS_STR_LJUST
-#define MICROPY_PY_BUILTINS_STR_LJUST (0)
+#define MICROPY_PY_BUILTINS_STR_LJUST (1)
 #endif
 
 // Whether str.rjust() method provided
 #ifndef MICROPY_PY_BUILTINS_STR_RJUST
-#define MICROPY_PY_BUILTINS_STR_RJUST (0)
+#define MICROPY_PY_BUILTINS_STR_RJUST (1)
 #endif
 
 // Whether str.partition()/str.rpartition() method provided
