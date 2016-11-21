@@ -253,6 +253,12 @@ STATIC const mp_rom_map_elem_t struni_locals_dict_table[] = {
     #if MICROPY_PY_BUILTINS_STR_CENTER
     { MP_ROM_QSTR(MP_QSTR_center), MP_ROM_PTR(&str_center_obj) },
     #endif
+	#if MICROPY_PY_BUILTINS_STR_LJUST
+    { MP_ROM_QSTR(MP_QSTR_ljust), MP_ROM_PTR(&str_ljust_obj) },
+    #endif
+	#if MICROPY_PY_BUILTINS_STR_RJUST
+    { MP_ROM_QSTR(MP_QSTR_rjust), MP_ROM_PTR(&str_rjust_obj) },
+    #endif
     { MP_ROM_QSTR(MP_QSTR_lower), MP_ROM_PTR(&str_lower_obj) },
     { MP_ROM_QSTR(MP_QSTR_upper), MP_ROM_PTR(&str_upper_obj) },
     { MP_ROM_QSTR(MP_QSTR_isspace), MP_ROM_PTR(&str_isspace_obj) },
