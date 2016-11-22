@@ -29,6 +29,7 @@
 #define MICROPY_ENABLE_SOURCE_LINE                  (1)
 #define MICROPY_MODULE_WEAK_LINKS                   (1)
 #define MICROPY_CAN_OVERRIDE_BUILTINS               (1)
+#define MICROPY_PERSISTENT_CODE_LOAD                (1)
 #define MICROPY_PY_BUILTINS_COMPLEX                 (1)
 #define MICROPY_PY_BUILTINS_STR_UNICODE             (1)
 #define MICROPY_PY_BUILTINS_BYTEARRAY               (1)
