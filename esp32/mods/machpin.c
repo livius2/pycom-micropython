@@ -164,6 +164,10 @@ IRAM_ATTR uint32_t pin_get_value (const pin_obj_t* self) {
     return gpio_get_level(self->pin_number);
 }
 
+void pin_get_values (const pin_obj_t* self, uint32_t* buf, uint32_t count) {	
+	gpio_get_levels(self->pin_number, buf, count);
+}
+
 static IRAM_ATTR void machpin_intr_process (void* arg) {
     ESP_GPIO_INTR_DISABLE();
     uint32_t gpio_intr_status = READ_PERI_REG(GPIO_STATUS_REG);
