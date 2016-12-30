@@ -306,6 +306,19 @@ esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level);
 int gpio_get_level(gpio_num_t gpio_num);
 
 /**
+ * @brief  GPIO get input level in loop
+ *
+ * @param  gpio_num GPIO number. If you want to get the logic level of e.g. pin GPIO16, gpio_num should be GPIO_NUM_16 (16);
+ * @param  buf to store data
+ *     array of GPIO level, every entry contain:
+ *     - 0 the GPIO input level is 0
+ *     - 1 the GPIO input level is 1
+  * @param  count number of reads in loop
+ *
+ */
+void gpio_get_levels(gpio_num_t gpio_num, uint32_t* buf, uint32_t count);    
+
+/**
  * @brief	   GPIO set direction
  *
  * Configure GPIO direction,such as output_only,input_only,output_and_input
