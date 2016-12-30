@@ -170,6 +170,22 @@ int gpio_get_level(gpio_num_t gpio_num)
     }
 }
 
+void gpio_get_levels(gpio_num_t gpio_num, uint32_t* buf, uint32_t count)
+{
+    int i;    
+
+    if (gpio_num < 32) {
+        for ( i = 0; i < count; ++i) {
+            buf[i] = (GPIO.in >> gpio_num) & 0x1;
+        }
+    } else {
+		gpio_num -= 32;
+		for ( i = 0; i < count; ++i) {
+            buf[i] = (GPIO.in1.data >> gpio_num) & 0x1;
+        }
+    }
+}
+
 esp_err_t gpio_set_pull_mode(gpio_num_t gpio_num, gpio_pull_mode_t pull)
 {
     if(!is_valid_gpio(gpio_num)) {
