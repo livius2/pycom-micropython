@@ -86,4 +86,5 @@ void pin_irq_enable (mp_obj_t self_in);
 void pin_irq_disable (mp_obj_t self_in);
 void pin_set_value (const pin_obj_t* self);
 uint32_t pin_get_value (const pin_obj_t* self);
+void pin_get_values (const pin_obj_t* self, uint32_t* buf, uint32_t count);
 #endif  // PYBPIN_H_
