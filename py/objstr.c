@@ -851,8 +851,8 @@ STATIC mp_obj_t str_center(size_t n_args, const mp_obj_t *args) {
 #endif
 
 
-#if MICROPY_PY_BUILTINS_STR_LJUST
-STATIC mp_obj_t str_ljust(size_t n_args, const mp_obj_t *args) {
+#if MICROPY_PY_BUILTINS_STR_RJUST
+STATIC mp_obj_t str_rjust(size_t n_args, const mp_obj_t *args) {
 	//declaration have already check about arguments count
 	//if ((n_args<2) || (n_args>3)) {
 	//	mp_raise_TypeError("wrong number of arguments");
@@ -880,8 +880,8 @@ STATIC mp_obj_t str_ljust(size_t n_args, const mp_obj_t *args) {
 }
 #endif
 
-#if MICROPY_PY_BUILTINS_STR_RJUST
-STATIC mp_obj_t str_rjust(size_t n_args, const mp_obj_t *args) {
+#if MICROPY_PY_BUILTINS_STR_LJUST
+STATIC mp_obj_t str_ljust(size_t n_args, const mp_obj_t *args) {
 	//declaration have already check about arguments count
 	//if ((n_args<2) || (n_args>3)) {
 	//	mp_raise_TypeError("wrong number of arguments");
