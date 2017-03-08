@@ -151,6 +151,8 @@ STATIC mp_obj_t socket_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_
     s->sock_base.nic_type = NULL;
     s->sock_base.u_param.fileno = -1;
     s->sock_base.timeout = -1;      // sockets are blocking by default
+    s->sock_base.is_ssl = false;
+    s->sock_base.connected = false;
 
     if (n_args > 0) {
         s->sock_base.u_param.domain = mp_obj_get_int(args[0]);
@@ -197,16 +199,27 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_1(socket_close_obj, socket_close);
 // method socket.bind(address)
 STATIC mp_obj_t socket_bind(mp_obj_t self_in, mp_obj_t addr_in) {
     mod_network_socket_obj_t *self = self_in;
-
-    // get address
-    uint8_t ip[MOD_NETWORK_IPV4ADDR_BUF_SIZE];
-    mp_uint_t port = netutils_parse_inet_addr(addr_in, ip, NETUTILS_LITTLE);
-
-    // call the NIC to bind the socket
     int _errno;
-    if (self->sock_base.nic_type->n_bind(self, ip, port, &_errno) != 0) {
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
+
+#ifdef LOPY
+    if (self->sock_base.nic_type == &mod_network_nic_type_lora) {
+        mp_uint_t port = mp_obj_get_int(addr_in);
+
+        if (self->sock_base.nic_type->n_bind(self, NULL, port, &_errno) != 0) {
+            nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
+        }
+    } else {
+#endif
+        // get the address
+        uint8_t ip[MOD_NETWORK_IPV4ADDR_BUF_SIZE];
+        mp_uint_t port = netutils_parse_inet_addr(addr_in, ip, NETUTILS_LITTLE);
+
+        if (self->sock_base.nic_type->n_bind(self, ip, port, &_errno) != 0) {
+            nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
+        }
+#ifdef LOPY
     }
+#endif
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(socket_bind_obj, socket_bind);
@@ -242,11 +255,14 @@ STATIC mp_obj_t socket_accept(mp_obj_t self_in) {
     uint8_t ip[MOD_NETWORK_IPV4ADDR_BUF_SIZE];
     mp_uint_t port;
     int _errno;
+    MP_THREAD_GIL_EXIT();
     if (self->sock_base.nic_type->n_accept(self, socket2, ip, &port, &_errno) != 0) {
+        MP_THREAD_GIL_ENTER();
         nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
     }
 
     // add the socket to the list
+    MP_THREAD_GIL_ENTER();
     modusocket_socket_add(socket2->sock_base.sd, true);
 
     // make the return value
@@ -267,12 +283,12 @@ STATIC mp_obj_t socket_connect(mp_obj_t self_in, mp_obj_t addr_in) {
 
     // connect the socket
     int _errno;
+    MP_THREAD_GIL_EXIT();
     if (self->sock_base.nic_type->n_connect(self, ip, port, &_errno) != 0) {
-//        if (!self->sock_base.cert_req && _errno == SL_ESECSNOVERIFY) { // TODO
-//            return mp_const_none;
-//        }
+        MP_THREAD_GIL_ENTER();
         nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
     }
+    MP_THREAD_GIL_ENTER();
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(socket_connect_obj, socket_connect);
@@ -283,7 +299,9 @@ STATIC mp_obj_t socket_send(mp_obj_t self_in, mp_obj_t buf_in) {
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf_in, &bufinfo, MP_BUFFER_READ);
     int _errno;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_send(self, bufinfo.buf, bufinfo.len, &_errno);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
         if (_errno == EAGAIN && self->sock_base.timeout > 0) {
             nlr_raise(mp_obj_new_exception_msg(&mp_type_TimeoutError, "timed out"));
@@ -301,12 +319,19 @@ STATIC mp_obj_t socket_recv(mp_obj_t self_in, mp_obj_t len_in) {
     vstr_t vstr;
     vstr_init_len(&vstr, len);
     int _errno;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_recv(self, (byte*)vstr.buf, len, &_errno);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
-        if (_errno == EAGAIN && self->sock_base.timeout > 0) {
-            nlr_raise(mp_obj_new_exception_msg(&mp_type_TimeoutError, "timed out"));
+        if (_errno == EAGAIN) {
+            if (self->sock_base.timeout > 0) {
+                nlr_raise(mp_obj_new_exception_msg(&mp_type_TimeoutError, "timed out"));
+            } else {
+                ret = 0;        // non-blocking socket
+            }
+        } else {
+            nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
         }
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
     }
     if (ret == 0) {
         return mp_const_empty_bytes;
@@ -331,7 +356,9 @@ STATIC mp_obj_t socket_sendto(mp_obj_t self_in, mp_obj_t data_in, mp_obj_t addr_
 
     // call the nic to sendto
     int _errno;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_sendto(self, bufinfo.buf, bufinfo.len, ip, port, &_errno);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
         if (_errno == EAGAIN && self->sock_base.timeout > 0) {
             nlr_raise(mp_obj_new_exception_msg(&mp_type_TimeoutError, "timed out"));
@@ -350,7 +377,9 @@ STATIC mp_obj_t socket_recvfrom(mp_obj_t self_in, mp_obj_t len_in) {
     byte ip[4];
     mp_uint_t port;
     int _errno;
+    MP_THREAD_GIL_EXIT();
     mp_int_t ret = self->sock_base.nic_type->n_recvfrom(self, (byte*)vstr.buf, vstr.len, ip, &port, &_errno);
+    MP_THREAD_GIL_ENTER();
     if (ret < 0) {
         if (_errno == EAGAIN && self->sock_base.timeout > 0) {
             nlr_raise(mp_obj_new_exception_msg(&mp_type_TimeoutError, "timed out"));
@@ -481,6 +510,7 @@ STATIC const mp_map_elem_t raw_socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_send),            (mp_obj_t)&socket_send_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_recv),            (mp_obj_t)&socket_recv_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_settimeout),      (mp_obj_t)&socket_settimeout_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_bind),            (mp_obj_t)&socket_bind_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_setblocking),     (mp_obj_t)&socket_setblocking_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_setsockopt),      (mp_obj_t)&socket_setsockopt_obj },
 };
@@ -543,15 +573,6 @@ STATIC const mp_obj_type_t raw_socket_type = {
     .protocol = &raw_socket_stream_p,
     .locals_dict = (mp_obj_t)&raw_socket_locals_dict,
 };
-
-// TODO
-//STATIC const mp_obj_type_t lora_socket_type = {
-//    { &mp_type_type },
-//    .name = MP_QSTR_socket,
-//    .make_new = socket_make_new,
-//    .stream_p = &raw_socket_stream_p,
-//    .locals_dict = (mp_obj_t)&lora_socket_locals_dict,
-//};
 
 ///******************************************************************************/
 //// usocket module

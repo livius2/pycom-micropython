@@ -3,6 +3,8 @@ LoPy documentation and references
 
 .. toctree::
 
+    lopy/getstarted.rst
+    lopy/underhood.rst
     lopy/quickref.rst
     lopy/general.rst
     lopy/tutorial/index.rst

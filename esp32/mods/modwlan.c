@@ -26,6 +26,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
+#include "esp_wifi_types.h"
 #include "esp_event_loop.h"
 
 //#include "timeutils.h"
@@ -38,6 +39,7 @@
 #include "serverstask.h"
 #include "mpexception.h"
 #include "antenna.h"
+#include "modussl.h"
 
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
@@ -82,7 +84,7 @@
 //
 //#define IPV4_ADDR_STR_LEN_MAX           (16)
 
-#define WLAN_MAX_RX_SIZE                (1024 + 256)
+#define WLAN_MAX_RX_SIZE                1024
 #define WLAN_MAX_TX_SIZE                1476
 
 #define MAKE_SOCKADDR(addr, ip, port)       struct sockaddr addr; \
@@ -190,26 +192,26 @@ static int wlan_socket_ioctl (mod_network_socket_obj_t *s, mp_uint_t request, mp
 //!
 //*****************************************************************************
 void wlan_pre_init (void) {
-    // create the wlan lock
-//    ASSERT(OSI_OK == sl_LockObjCreate(&wlan_LockObj, "WlanLock"));
-//    wifi_set_event_handler_cb(wlan_event_handler_cb);
+    wifi_event_group = xEventGroupCreate();
     tcpip_adapter_init();
     ESP_ERROR_CHECK(esp_event_loop_init(wlan_event_handler, NULL));
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_start());
     wlan_obj.base.type = (mp_obj_t)&mod_network_nic_type_wlan;
-    wifi_event_group = xEventGroupCreate();
 }
 
 void wlan_setup (int32_t mode, const char *ssid, uint32_t ssid_len, uint32_t auth, const char *key, uint32_t key_len,
                  uint32_t channel, uint32_t antenna, bool add_mac) {
 
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
     // stop the servers
     wlan_servers_stop();
 
     esp_wifi_get_mac(WIFI_IF_STA, wlan_obj.mac);
+
+    esp_wifi_stop();
 
     wlan_set_antenna(antenna);
     wlan_set_mode(mode);
@@ -217,6 +219,8 @@ void wlan_setup (int32_t mode, const char *ssid, uint32_t ssid_len, uint32_t aut
     if (mode != WIFI_MODE_STA) {
         wlan_setup_ap (ssid, ssid_len, auth, key, key_len, channel, add_mac);
     }
+
+    esp_wifi_start();
 
     // start the servers before returning
     wlan_servers_start();
@@ -271,28 +275,41 @@ void wlan_off_on (void) {
 // DEFINE STATIC FUNCTIONS
 //*****************************************************************************
 
-//STATIC void wlan_event_handler_cb (System_Event_t *event) {
-//    switch (event->event_id) {
-//    case EVENT_STAMODE_SCAN_DONE:
-//        break;
-//    default:
-//        break;
-//    }
-//}
-
 STATIC esp_err_t wlan_event_handler(void *ctx, system_event_t *event) {
     switch(event->event_id) {
     case SYSTEM_EVENT_STA_START:
         esp_wifi_connect();
         break;
+    case SYSTEM_EVENT_STA_CONNECTED:
+    {
+        system_event_sta_connected_t *_event = (system_event_sta_connected_t *)&event->event_info;
+        memcpy(wlan_obj.bssid, _event->bssid, 6);
+        wlan_obj.channel = _event->channel;
+        wlan_obj.auth = _event->authmode;
+    }
+        break;
     case SYSTEM_EVENT_STA_GOT_IP:
         xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
-        /* This is a workaround as ESP32 WiFi libs don't currently
-           auto-reassociate. */
-        esp_wifi_connect();
         xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+        system_event_sta_disconnected_t *disconn = &event->event_info.disconnected;
+        switch (disconn->reason) {
+            case WIFI_REASON_AUTH_FAIL:
+                wlan_obj.disconnected = true;
+                break;
+            default:
+                // Let other errors through and try to reconnect.
+                break;
+        }
+        if (!wlan_obj.disconnected) {
+            wifi_mode_t mode;
+            if (esp_wifi_get_mode(&mode) == ESP_OK) {
+                if (mode & WIFI_MODE_STA) {
+                    esp_wifi_connect();
+                }
+            }
+        }
         break;
     default:
         break;
@@ -319,14 +336,18 @@ STATIC void wlan_clear_data (void) {
 
 STATIC void wlan_servers_start (void) {
     // start the servers if they were enabled before
-    if (wlan_obj.servers_enabled) {
+    if (wlan_obj.enable_servers) {
         servers_start();
     }
 }
 
 STATIC void wlan_servers_stop (void) {
-    // Stop all other processes using the wlan engine
-    if ((wlan_obj.servers_enabled = servers_are_enabled())) {
+    if (servers_are_enabled()) {
+        wlan_obj.enable_servers = true;
+    }
+
+    // stop all other processes using the wlan engine
+    if (wlan_obj.enable_servers) {
         servers_stop();
     }
 }
@@ -363,6 +384,14 @@ STATIC void wlan_validate_mode (uint mode) {
 STATIC void wlan_set_mode (uint mode) {
     wlan_obj.mode = mode;
     esp_wifi_set_mode(mode);
+    wifi_ps_type_t wifi_ps_type;
+    if (mode != WIFI_MODE_STA) {
+        wifi_ps_type = WIFI_PS_NONE;
+    } else {
+        wifi_ps_type = WIFI_PS_MODEM;
+    }
+    // set the power saving mode
+    esp_wifi_set_ps(wifi_ps_type);
 }
 
 STATIC void wlan_validate_ssid_len (uint32_t len) {
@@ -443,6 +472,8 @@ STATIC modwlan_Status_t wlan_do_connect (const char* ssid, uint32_t ssid_len, co
 
     // first close any active connections
     esp_wifi_disconnect();
+
+    wlan_obj.disconnected = false;
 
     memcpy(config.sta.ssid, ssid, ssid_len);
     if (key) {
@@ -611,6 +642,20 @@ STATIC mp_obj_t wlan_init(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(wlan_init_obj, 1, wlan_init);
 
+STATIC mp_obj_t wlan_deinit(mp_obj_t self_in) {
+
+    if (servers_are_enabled()){
+       wlan_servers_stop();
+    }
+
+    esp_wifi_stop();
+    esp_wifi_set_mode(WIFI_MODE_NULL);
+    esp_wifi_deinit();
+
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(wlan_deinit_obj, wlan_deinit);
+
 STATIC mp_obj_t wlan_scan(mp_obj_t self_in) {
     STATIC const qstr wlan_scan_info_fields[] = {
         MP_QSTR_ssid, MP_QSTR_bssid, MP_QSTR_sec, MP_QSTR_channel, MP_QSTR_rssi
@@ -708,7 +753,8 @@ STATIC mp_obj_t wlan_connect(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_
         timeout = mp_obj_get_int(args[3].u_obj);
     }
 
-    // connect to the requested access point
+    // copy the new ssid and connect to the requested access point
+    strcpy((char *)wlan_obj.ssid, ssid);
     modwlan_Status_t status;
     status = wlan_do_connect (ssid, ssid_len, bssid, key, key_len, timeout);
     if (status == MODWLAN_ERROR_TIMEOUT) {
@@ -716,6 +762,8 @@ STATIC mp_obj_t wlan_connect(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_
     } else if (status == MODWLAN_ERROR_INVALID_PARAMS) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, mpexception_value_invalid_arguments));
     }
+    memcpy(wlan_obj.key, key, key_len);
+    wlan_obj.key[key_len] = '\0';
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(wlan_connect_obj, 1, wlan_connect);
@@ -726,6 +774,7 @@ STATIC mp_obj_t wlan_disconnect(mp_obj_t self_in) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_request_not_possible));
     }
     esp_wifi_disconnect();
+    wlan_obj.disconnected = true;
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_1(wlan_disconnect_obj, wlan_disconnect);
@@ -749,8 +798,13 @@ STATIC mp_obj_t wlan_ifconfig (mp_uint_t n_args, const mp_obj_t *pos_args, mp_ma
    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(args), wlan_ifconfig_args, args);
 
    // check the interface id
-   if (args[0].u_int != 0) {
+   tcpip_adapter_if_t adapter_if;
+   if (args[0].u_int > 1) {
        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_resource_not_avaliable));
+   } else if (args[0].u_int == 0) {
+        adapter_if = TCPIP_ADAPTER_IF_STA;
+   } else {
+        adapter_if = TCPIP_ADAPTER_IF_AP;
    }
 
    ip_addr_t dns_addr;
@@ -759,7 +813,7 @@ STATIC mp_obj_t wlan_ifconfig (mp_uint_t n_args, const mp_obj_t *pos_args, mp_ma
         // get
         tcpip_adapter_ip_info_t ip_info;
         dns_addr = dns_getserver(0);
-        if (ESP_OK == tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info)) {
+        if (ESP_OK == tcpip_adapter_get_ip_info(adapter_if, &ip_info)) {
             mp_obj_t ifconfig[4] = {
                 netutils_format_ipv4_addr((uint8_t *)&ip_info.ip.addr, NETUTILS_BIG),
                 netutils_format_ipv4_addr((uint8_t *)&ip_info.netmask.addr, NETUTILS_BIG),
@@ -777,29 +831,14 @@ STATIC mp_obj_t wlan_ifconfig (mp_uint_t n_args, const mp_obj_t *pos_args, mp_ma
            mp_obj_get_array_fixed_n(args[1].u_obj, 4, &items);
 
            // stop the DHCP client first
-           tcpip_adapter_dhcpc_stop(TCPIP_ADAPTER_IF_STA);
+           tcpip_adapter_dhcpc_stop(adapter_if);
 
            tcpip_adapter_ip_info_t ip_info;
            netutils_parse_ipv4_addr(items[0], (uint8_t *)&ip_info.ip.addr, NETUTILS_BIG);
            netutils_parse_ipv4_addr(items[1], (uint8_t *)&ip_info.netmask.addr, NETUTILS_BIG);
            netutils_parse_ipv4_addr(items[2], (uint8_t *)&ip_info.gw.addr, NETUTILS_BIG);
            netutils_parse_ipv4_addr(items[3], (uint8_t *)&dns_addr.u_addr.ip4.addr, NETUTILS_BIG);
-           tcpip_adapter_set_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info);
-           dns_setserver(0, &dns_addr);
-
-           // if (wlan_obj.mode == ROLE_AP) {
-           //     ASSERT_ON_ERROR(sl_NetCfgSet(SL_IPV4_AP_P2P_GO_STATIC_ENABLE, IPCONFIG_MODE_ENABLE_IPV4, sizeof(SlNetCfgIpV4Args_t), (uint8_t *)&ipV4));
-           //     SlNetAppDhcpServerBasicOpt_t dhcpParams;
-           //     dhcpParams.lease_time      =  4096;                             // lease time (in seconds) of the IP Address
-           //     dhcpParams.ipv4_addr_start =  ipV4.ipV4 + 1;                    // first IP Address for allocation.
-           //     dhcpParams.ipv4_addr_last  =  (ipV4.ipV4 & 0xFFFFFF00) + 254;   // last IP Address for allocation.
-           //     ASSERT_ON_ERROR(sl_NetAppStop(SL_NET_APP_DHCP_SERVER_ID));      // stop DHCP server before settings
-           //     ASSERT_ON_ERROR(sl_NetAppSet(SL_NET_APP_DHCP_SERVER_ID, NETAPP_SET_DHCP_SRV_BASIC_OPT,
-           //                     sizeof(SlNetAppDhcpServerBasicOpt_t), (uint8_t* )&dhcpParams));  // set parameters
-           //     ASSERT_ON_ERROR(sl_NetAppStart(SL_NET_APP_DHCP_SERVER_ID));     // start DHCP server with new settings
-           // } else {
-           //     ASSERT_ON_ERROR(sl_NetCfgSet(SL_IPV4_STA_P2P_CL_STATIC_ENABLE, IPCONFIG_MODE_ENABLE_IPV4, sizeof(SlNetCfgIpV4Args_t), (uint8_t *)&ipV4));
-           // }
+           tcpip_adapter_set_ip_info(adapter_if, &ip_info);
        } else {
            // check for the correct string
            const char *mode = mp_obj_str_get_str(args[1].u_obj);
@@ -807,19 +846,10 @@ STATIC mp_obj_t wlan_ifconfig (mp_uint_t n_args, const mp_obj_t *pos_args, mp_ma
                nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, mpexception_value_invalid_arguments));
            }
 
-           // // only if we are not in AP mode
-           // if (wlan_obj.mode != ROLE_AP) {
-           //     uint8_t val = 1;
-           //     sl_NetCfgSet(SL_IPV4_STA_P2P_CL_DHCP_ENABLE, IPCONFIG_MODE_ENABLE_IPV4, 1, &val);
-           // }
-           if (ESP_OK != tcpip_adapter_dhcpc_start(TCPIP_ADAPTER_IF_STA)) {
+           if (ESP_OK != tcpip_adapter_dhcpc_start(adapter_if)) {
                nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
            }
        }
-       // // config values have changed, so reset
-       // wlan_reset();
-       // // set current time and date (needed to validate certificates)
-       // wlan_set_current_time (pyb_rtc_get_seconds());
        return mp_const_none;
    }
 }
@@ -857,6 +887,12 @@ STATIC mp_obj_t wlan_ssid (mp_uint_t n_args, const mp_obj_t *args) {
     }
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wlan_ssid_obj, 1, 2, wlan_ssid);
+
+STATIC mp_obj_t wlan_bssid (mp_obj_t self_in) {
+    wlan_obj_t *self = self_in;
+    return mp_obj_new_bytes((const byte *)self->bssid, 6);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_1(wlan_bssid_obj, wlan_bssid);
 
 STATIC mp_obj_t wlan_auth (mp_uint_t n_args, const mp_obj_t *args) {
     wlan_obj_t *self = args[0];
@@ -974,6 +1010,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(wlan_mac_obj, 1, 2, wlan_mac);
 
 STATIC const mp_map_elem_t wlan_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_init),                (mp_obj_t)&wlan_init_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_deinit),              (mp_obj_t)&wlan_deinit_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_scan),                (mp_obj_t)&wlan_scan_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_connect),             (mp_obj_t)&wlan_connect_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_disconnect),          (mp_obj_t)&wlan_disconnect_obj },
@@ -981,6 +1018,7 @@ STATIC const mp_map_elem_t wlan_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_ifconfig),            (mp_obj_t)&wlan_ifconfig_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_mode),                (mp_obj_t)&wlan_mode_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_ssid),                (mp_obj_t)&wlan_ssid_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_bssid),               (mp_obj_t)&wlan_bssid_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_auth),                (mp_obj_t)&wlan_auth_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_channel),             (mp_obj_t)&wlan_channel_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_antenna),             (mp_obj_t)&wlan_antenna_obj },
@@ -992,7 +1030,7 @@ STATIC const mp_map_elem_t wlan_locals_dict_table[] = {
     // class constants
     { MP_OBJ_NEW_QSTR(MP_QSTR_STA),                 MP_OBJ_NEW_SMALL_INT(WIFI_MODE_STA) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_AP),                  MP_OBJ_NEW_SMALL_INT(WIFI_MODE_AP) },
-//    { MP_OBJ_NEW_QSTR(MP_QSTR_STA_AP),              MP_OBJ_NEW_SMALL_INT(STATIONAP_MODE) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_STA_AP),              MP_OBJ_NEW_SMALL_INT(WIFI_MODE_APSTA) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_WEP),                 MP_OBJ_NEW_SMALL_INT(WIFI_AUTH_WEP) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_WPA),                 MP_OBJ_NEW_SMALL_INT(WIFI_AUTH_WPA_PSK) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_WPA2),                MP_OBJ_NEW_SMALL_INT(WIFI_AUTH_WPA2_PSK) },
@@ -1070,7 +1108,20 @@ static void wlan_socket_close(mod_network_socket_obj_t *s) {
     // this is to prevent the finalizer to close a socket that failed when being created
     if (s->sock_base.sd >= 0) {
         modusocket_socket_delete(s->sock_base.sd);
-        close(s->sock_base.sd);
+        if (s->sock_base.is_ssl) {
+            mp_obj_ssl_socket_t *ss = (mp_obj_ssl_socket_t *)s;
+            if (ss->sock_base.connected) {
+                mbedtls_ssl_close_notify(&ss->ssl);
+            }
+            mbedtls_net_free(&ss->context_fd);
+            mbedtls_ssl_free(&ss->ssl);
+            mbedtls_ssl_config_free(&ss->conf);
+            mbedtls_ctr_drbg_free(&ss->ctr_drbg);
+            mbedtls_entropy_free(&ss->entropy);
+        } else {
+            close(s->sock_base.sd);
+        }
+        s->sock_base.connected = false;
         s->sock_base.sd = -1;
     }
 }
@@ -1108,6 +1159,8 @@ static int wlan_socket_accept(mod_network_socket_obj_t *s, mod_network_socket_ob
         return -1;
     }
 
+    s2->sock_base.connected = true;
+
     // return ip and port
     UNPACK_SOCKADDR(addr, ip, *port);
     return 0;
@@ -1116,17 +1169,58 @@ static int wlan_socket_accept(mod_network_socket_obj_t *s, mod_network_socket_ob
 static int wlan_socket_connect(mod_network_socket_obj_t *s, byte *ip, mp_uint_t port, int *_errno) {
     MAKE_SOCKADDR(addr, ip, port)
     int ret = connect(s->sock_base.sd, &addr, sizeof(addr));
-    if (ret != 0) {
-        *_errno = errno;
-        return -1;
+
+    // printf("Connected.\n");
+
+    if (s->sock_base.is_ssl && (ret == 0)) {
+        mp_obj_ssl_socket_t *ss = (mp_obj_ssl_socket_t *)s;
+        mbedtls_ssl_set_bio(&ss->ssl, &ss->context_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+        // printf("Performing the SSL/TLS handshake...\n");
+
+        while ((ret = mbedtls_ssl_handshake(&ss->ssl)) != 0)
+        {
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+            {
+                // printf("mbedtls_ssl_handshake returned -0x%x\n", -ret);
+                *_errno = ret;
+                return -1;
+            }
+        }
+
+        // printf("Verifying peer X.509 certificate...\n");
+
+        if ((ret = mbedtls_ssl_get_verify_result(&ss->ssl)) != 0) {
+            /* In real life, we probably want to close connection if ret != 0 */
+            // printf("Failed to verify peer certificate!\n");
+            *_errno = ret;
+            return -1;
+        } else {
+            // printf("Certificate verified.\n");
+        }
     }
+
+    s->sock_base.connected = true;
     return 0;
 }
 
 static int wlan_socket_send(mod_network_socket_obj_t *s, const byte *buf, mp_uint_t len, int *_errno) {
     mp_int_t bytes = 0;
     if (len > 0) {
-        bytes = send(s->sock_base.sd, (const void *)buf, len, 0);
+        if (s->sock_base.is_ssl) {
+            mp_obj_ssl_socket_t *ss = (mp_obj_ssl_socket_t *)s;
+            while ((bytes = mbedtls_ssl_write(&ss->ssl, (const unsigned char *)buf, len)) <= 0) {
+                if (bytes != MBEDTLS_ERR_SSL_WANT_READ && bytes != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    // printf("mbedtls_ssl_write returned -0x%x\n", -bytes);
+                    break;
+                } else {
+                    *_errno = EAGAIN;
+                    return -1;
+                }
+            }
+        } else {
+            bytes = send(s->sock_base.sd, (const void *)buf, len, 0);
+        }
     }
     if (bytes <= 0) {
         *_errno = errno;
@@ -1136,10 +1230,40 @@ static int wlan_socket_send(mod_network_socket_obj_t *s, const byte *buf, mp_uin
 }
 
 static int wlan_socket_recv(mod_network_socket_obj_t *s, byte *buf, mp_uint_t len, int *_errno) {
-    int ret = recv(s->sock_base.sd, buf, MIN(len, WLAN_MAX_RX_SIZE), 0);
-    if (ret < 0) {
-        *_errno = errno;
-        return -1;
+    int ret;
+    if (s->sock_base.is_ssl) {
+        mp_obj_ssl_socket_t *ss = (mp_obj_ssl_socket_t *)s;
+        do {
+            ret = mbedtls_ssl_read(&ss->ssl, (unsigned char *)buf, len);
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE || ret == MBEDTLS_ERR_SSL_TIMEOUT || ret == -0x4C) { // FIXME
+                // printf("Nothing to read\n");
+                *_errno = EAGAIN;
+                return -1;
+            } else if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+                // printf("Close notify received\n");
+                ret = 0;
+                break;
+            } else if (ret < 0) {
+                // printf("mbedtls_ssl_read returned -0x%x\n", -ret);
+                break;
+            } else if (ret == 0) {
+                // printf("Connection closed\n");
+                break;
+            } else {
+                // printf("Data read OK = %d\n", ret);
+                break;
+            }
+        } while (true);
+        if (ret < 0) {
+            *_errno = ret;
+            return -1;
+        }
+    } else {
+        ret = recv(s->sock_base.sd, buf, MIN(len, WLAN_MAX_RX_SIZE), 0);
+        if (ret < 0) {
+            *_errno = errno;
+            return -1;
+        }
     }
     return ret;
 }

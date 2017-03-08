@@ -6,6 +6,18 @@
 
 The ``machine`` module contains specific functions related to the board.
 
+Quick usage example
+-------------------
+
+    ::
+
+        import machine
+
+        help(machine) # display all members from the machine module
+        machine.freq() # get the CPU frequency
+        machine.unique_id() # return the 6-byte unique id of the board (the LoPy's WiFi MAC address)
+
+
 Reset related functions
 -----------------------
 
@@ -38,7 +50,7 @@ Interrupt related functions
      this function is to pass it the value returned by ``disable_irq`` to
      exit a critical section.
 
-.. only:: port_2wipy or port_lopy
+.. only:: port_2wipy or port_lopy or port_pycom_esp32
 
   .. function:: disable_irq()
 
@@ -62,7 +74,7 @@ Power related functions
 
         Returns CPU frequency in hertz.
 
-    .. only:: port_wipy or port_lopy or port_2wipy
+    .. only:: port_wipy or port_lopy or port_2wipy or port_pycom_esp32
 
         Returns a tuple of clock frequencies: ``(sysclk,)``
         These correspond to:
@@ -100,7 +112,7 @@ Power related functions
 Miscellaneous functions
 -----------------------
 
-.. only:: port_wipy or port_lopy or port_2wipy
+.. only:: port_wipy or port_lopy or port_2wipy or port_pycom_esp32
 
     .. function:: main(filename)
 
@@ -119,6 +131,9 @@ Miscellaneous functions
    from a board/SoC instance to another, if underlying hardware allows. Length
    varies by hardware (so use substring of a full value if you expect a short
    ID). In some MicroPython ports, ID corresponds to the network MAC address.
+
+   Hint: use :mod:`binascii`.hexlify() to convert the byte string to the much used 
+   hexadecimal form.
 
 .. only:: port_wipy
 
@@ -162,13 +177,13 @@ Miscellaneous functions
 
       wake reasons
 
-.. only:: port_lopy or port_2wipy
+.. only:: port_lopy or port_2wipy or port_pycom_esp32
 
   Constants
   ---------
 
   .. data:: machine.PWRON_RESET
-  .. data:: machine.SOFT_RESET
+            machine.SOFT_RESET
 
       reset causes
 
@@ -192,28 +207,35 @@ Miscellaneous functions
      machine.WDT.rst
 
 
-.. only:: port_lopy
+.. only:: port_lopy or port_2wipy or port_pycom_esp32
 
   Classes
   -------
 
-  .. toctree::
-     :maxdepth: 1
+  .. raw:: html
 
-     machine.Pin.rst
-     machine.SPI.rst
-     machine.UART.rst
-     machine.I2C.rst
-
-.. only:: port_2wipy
-
-  Classes
-  -------
+    <modify_html name="TOC_1"/>
 
   .. toctree::
-     :maxdepth: 1
+    :maxdepth: 1
 
-     machine.Pin.rst
-     machine.SPI.rst
-     machine.UART.rst
-     machine.I2C.rst
+    machine.Pin.rst
+    machine.UART.rst
+    machine.SPI.rst
+    machine.Timer.rst
+    machine.I2C.rst
+    machine.PWM.rst
+    machine.ADC.rst
+    machine.DAC.rst
+    machine.SD.rst
+
+  .. raw:: html
+
+    <script>
+        toc = document.getElementsByName('TOC_1')[0].getElementsByTagName('div')[0].getElementsByTagName('ul')[0].getElementsByTagName('li');
+        for (i = 0; i < toc.length; i++) {
+            if (toc[i].innerText.search(/ADCChannel|PWMChannel/) !== -1) {
+                toc[i].remove();
+            }
+        }
+    </script>

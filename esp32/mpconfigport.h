@@ -15,7 +15,7 @@
 #include <stdint.h>
 
 // options to control how Micro Python is built
-#define MICROPY_OBJ_REPR                            (MICROPY_OBJ_REPR_C)
+#define MICROPY_OBJ_REPR                            (MICROPY_OBJ_REPR_A)
 #define MICROPY_ALLOC_PATH_MAX                      (128)
 #define MICROPY_EMIT_X64                            (0)
 #define MICROPY_EMIT_THUMB                          (0)
@@ -23,7 +23,7 @@
 #define MICROPY_MEM_STATS                           (0)
 #define MICROPY_DEBUG_PRINTERS                      (1)
 #define MICROPY_ENABLE_GC                           (1)
-#define MICROPY_STACK_CHECK                         (0)
+#define MICROPY_STACK_CHECK                         (1)
 #define MICROPY_HELPER_REPL                         (1)
 #define MICROPY_HELPER_LEXER_UNIX                   (0)
 #define MICROPY_ENABLE_SOURCE_LINE                  (1)
@@ -52,10 +52,12 @@
 #define MICROPY_PY_SYS                              (1)
 #define MICROPY_PY_THREAD                           (1)
 #define MICROPY_PY_THREAD_GIL                       (1)
+#define MICROPY_PY_THREAD_GIL_DIVISOR               (8)
 #define MICROPY_PY_SYS_MAXSIZE                      (1)
 #define MICROPY_PY_SYS_EXIT                         (1)
 #define MICROPY_PY_SYS_STDFILES                     (1)
 #define MICROPY_PY_UBINASCII                        (1)
+#define MICROPY_PY_UERRNO                           (1)
 #define MICROPY_PY_UCTYPES                          (1)
 #define MICROPY_PY_UHASHLIB                         (0)
 #define MICROPY_PY_UHASHLIB_SHA1                    (0)
@@ -75,10 +77,12 @@
 #define MICROPY_ENABLE_FINALISER                    (1)
 #define MICROPY_COMP_TRIPLE_TUPLE_ASSIGN            (1)
 #define MICROPY_USE_INTERNAL_PRINTF                 (0)
+#define MICROPY_PY_SYS_EXC_INFO                     (1)
 
 #define MICROPY_STREAMS_NON_BLOCK                   (1)
 #define MICROPY_PY_BUILTINS_TIMEOUTERROR            (1)
 #define MICROPY_PY_ALL_SPECIAL_METHODS              (1)
+#define MICROPY_USE_INTERNAL_ERRNO                  (1)
 
 #define MICROPY_ENABLE_EMERGENCY_EXCEPTION_BUF      (1)
 #define MICROPY_EMERGENCY_EXCEPTION_BUF_SIZE        (0)
@@ -131,6 +135,8 @@ extern const struct _mp_obj_module_t mp_module_uselect;
 extern const struct _mp_obj_module_t utime_module;
 extern const struct _mp_obj_module_t pycom_module;
 extern const struct _mp_obj_module_t mp_module_uhashlib;
+extern const struct _mp_obj_module_t module_ucrypto;
+extern const struct _mp_obj_module_t mp_module_ussl;
 
 #define MICROPY_PORT_BUILTIN_MODULES \
     { MP_OBJ_NEW_QSTR(MP_QSTR_umachine),        (mp_obj_t)&machine_module },      \
@@ -140,6 +146,10 @@ extern const struct _mp_obj_module_t mp_module_uhashlib;
     { MP_OBJ_NEW_QSTR(MP_QSTR_utime),           (mp_obj_t)&utime_module },        \
     { MP_OBJ_NEW_QSTR(MP_QSTR_pycom),           (mp_obj_t)&pycom_module },        \
     { MP_OBJ_NEW_QSTR(MP_QSTR_uhashlib),        (mp_obj_t)&mp_module_uhashlib },  \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ucrypto),         (mp_obj_t)&module_ucrypto },      \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ubinascii),       (mp_obj_t)&mp_module_ubinascii }, \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ussl),            (mp_obj_t)&mp_module_ussl },      \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_uerrno),          (mp_obj_t)&mp_module_uerrno },    \
 
 #define MICROPY_PORT_BUILTIN_MODULE_WEAK_LINKS \
     { MP_OBJ_NEW_QSTR(MP_QSTR_machine),         (mp_obj_t)&machine_module },      \
@@ -152,6 +162,9 @@ extern const struct _mp_obj_module_t mp_module_uhashlib;
     { MP_OBJ_NEW_QSTR(MP_QSTR_json),            (mp_obj_t)&mp_module_ujson },     \
     { MP_OBJ_NEW_QSTR(MP_QSTR_time),            (mp_obj_t)&utime_module },        \
     { MP_OBJ_NEW_QSTR(MP_QSTR_hashlib),         (mp_obj_t)&mp_module_uhashlib },  \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_crypto),          (mp_obj_t)&module_ucrypto },      \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ssl),             (mp_obj_t)&mp_module_ussl },      \
+    { MP_OBJ_NEW_QSTR(MP_QSTR_errno),           (mp_obj_t)&mp_module_uerrno },    \
 
 // extra constants
 #define MICROPY_PORT_CONSTANTS \
@@ -175,6 +188,8 @@ extern const struct _mp_obj_module_t mp_module_uhashlib;
     mp_obj_t mp_os_stream_o;                                    \
     mp_obj_t mp_os_read[3];                                     \
     mp_obj_t mp_os_write[3];                                    \
+    mp_obj_t mp_alarm_heap;                                     \
+    mp_obj_t mach_pwm_timer_obj[4];                             \
 
 // we need to provide a declaration/definition of alloca()
 #include <alloca.h>

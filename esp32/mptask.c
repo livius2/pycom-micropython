@@ -21,6 +21,7 @@
 #include "esp_event_loop.h"
 #include "nvs_flash.h"
 #include "esp_spi_flash.h"
+#include "soc/cpu.h"
 
 #include "py/mpconfig.h"
 #include "py/stackctrl.h"
@@ -46,10 +47,13 @@
 #include "random.h"
 #include "bootmgr.h"
 #include "updater.h"
-#include "config.h"
+#include "pycom_config.h"
 #include "mpsleep.h"
 #include "machrtc.h"
+#include "modbt.h"
+#include "machtimer.h"
 #include "mptask.h"
+#include "machtimer.h"
 
 #include "ff.h"
 #include "diskio.h"
@@ -61,14 +65,26 @@
 #include "freertos/queue.h"
 
 /******************************************************************************
+ DECLARE EXTERNAL FUNCTIONS
+ ******************************************************************************/
+
+/******************************************************************************
  DECLARE PRIVATE CONSTANTS
  ******************************************************************************/
-#define GC_POOL_SIZE_BYTES                                      (80 * 1024)
+#if defined(LOPY)
+    #if defined(USE_BAND_868)
+        #define GC_POOL_SIZE_BYTES                                          (64 * 1024)
+    #else
+        #define GC_POOL_SIZE_BYTES                                          (64 * 1024)
+    #endif
+#else
+    #define GC_POOL_SIZE_BYTES                                          (64 * 1024)
+#endif
 
 /******************************************************************************
  DECLARE PRIVATE FUNCTIONS
  ******************************************************************************/
-STATIC void mptask_pre_init (void);
+STATIC void mptask_preinit (void);
 STATIC void mptask_init_sflash_filesystem (void);
 #ifdef LOPY
 STATIC void mptask_update_lora_mac_address (void);
@@ -85,7 +101,7 @@ StackType_t *mpTaskStack;
  DECLARE PRIVATE DATA
  ******************************************************************************/
 static FATFS sflash_fatfs;
-static uint8_t gc_pool_upy[GC_POOL_SIZE_BYTES];
+static uint8_t *gc_pool_upy;
 
 static char fresh_main_py[] = "# main.py -- put your code here!\r\n";
 static char fresh_boot_py[] = "# boot.py -- run on boot-up\r\n"
@@ -99,8 +115,7 @@ static char fresh_boot_py[] = "# boot.py -- run on boot-up\r\n"
  ******************************************************************************/
 void TASK_Micropython (void *pvParameters) {
     // initialize the garbage collector with the top of our stack
-    volatile uint32_t sp;
-    asm volatile("or %0, a1, a1" : "=r"(sp));
+    volatile uint32_t sp = (uint32_t)get_sp();
     mpTaskStack = (StackType_t *)sp;
 
     bool soft_reset = false;
@@ -108,9 +123,27 @@ void TASK_Micropython (void *pvParameters) {
     // init the antenna select switch here
     antenna_init0();
     config_init0();
+    rtc_init0();
 
     // initialization that must not be repeted after a soft reset
-    mptask_pre_init();
+    mptask_preinit();
+    #if MICROPY_PY_THREAD
+    mp_irq_preinit();
+    mp_thread_preinit();
+    #endif
+
+    // initialise the stack pointer for the main thread (must be done after mp_thread_preinit)
+    mp_stack_set_top((void *)sp);
+
+    // the stack limit should be less than real stack size, so we have a chance
+    // to recover from hiting the limit (the limit is measured in bytes)
+    mp_stack_set_limit(MICROPY_TASK_STACK_LEN - 1024);
+
+    gc_pool_upy = pvPortMalloc(GC_POOL_SIZE_BYTES);
+    if (!gc_pool_upy) {
+        printf("mptask malloc failed!\n");
+        for ( ; ; );
+    }
 
 soft_reset:
 
@@ -119,11 +152,8 @@ soft_reset:
     mp_thread_init();
     #endif
 
-    // initialise the stack pointer for the main thread (must be done after mp_thread_init)
-    mp_stack_set_top((void*)sp);
-
     // GC init
-    gc_init((void *)gc_pool_upy, (void *)(gc_pool_upy + sizeof(gc_pool_upy)));
+    gc_init((void *)gc_pool_upy, (void *)(gc_pool_upy + GC_POOL_SIZE_BYTES));
 
     // MicroPython init
     mp_init();
@@ -132,18 +162,22 @@ soft_reset:
     mp_obj_list_append(mp_sys_path, MP_OBJ_NEW_QSTR(MP_QSTR_)); // current dir (or base dir of the script)
 
     // execute all basic initializations
+    pin_init0();    // always before the rest of the peripherals
     mpexception_init0();
     mpsleep_init0();
+    #if MICROPY_PY_THREAD
+    mp_irq_init0();
+    #endif
     moduos_init0();
     uart_init0();
-    pin_init0();
     mperror_init0();
     rng_init0();
-    rtc_init0();
-    mp_irq_init0();
+
     mp_hal_init(soft_reset);
     readline_init0();
     mod_network_init0();
+    modbt_init0();
+    modtimer_init0();
     bool safeboot = false;
     boot_info_t boot_info;
     uint32_t boot_info_offset;
@@ -228,9 +262,13 @@ soft_reset:
 
 soft_reset_exit:
 
+    #if MICROPY_PY_THREAD
+    mp_irq_kill();
+    #endif
     mpsleep_signal_soft_reset();
     mp_printf(&mp_plat_print, "PYB: soft reboot\n");
-    mp_hal_delay_us(25000);
+    // it needs to be this one in order to not mess with the GIL
+    ets_delay_us(5000);
     soft_reset = true;
     goto soft_reset;
 }
@@ -238,7 +276,7 @@ soft_reset_exit:
 /******************************************************************************
  DEFINE PRIVATE FUNCTIONS
  ******************************************************************************/
-STATIC void mptask_pre_init (void) {
+STATIC void mptask_preinit (void) {
     mperror_pre_init();
     wlan_pre_init();
     xTaskCreate(TASK_Servers, "Servers", SERVERS_STACK_LEN, NULL, SERVERS_PRIORITY, NULL);
@@ -309,7 +347,7 @@ STATIC void mptask_init_sflash_filesystem (void) {
 
 #ifdef LOPY
 STATIC void mptask_update_lora_mac_address (void) {
-    #define LORA_MAC_ADDR_PATH          "/flash/sys/lora.mac"
+    #define LORA_MAC_ADDR_PATH          "/flash/sys/lpwan.mac"
 
     FILINFO fno;
 
@@ -323,7 +361,7 @@ STATIC void mptask_update_lora_mac_address (void) {
             // file found, update the MAC address
             if (config_set_lora_mac(mac)) {
                 mp_hal_delay_ms(500);
-                ets_printf("\n\nLoRa MAC write OK\n\n");
+                ets_printf("\n\nLPWAN MAC write OK\n\n");
             } else {
                 res = FR_DENIED;    // just anything different than FR_OK
             }

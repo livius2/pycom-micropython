@@ -26,24 +26,28 @@ from collections import OrderedDict
 micropy_port = os.getenv('MICROPY_PORT') or 'pyboard'
 tags.add('port_' + micropy_port)
 ports = OrderedDict((
-    ('unix', 'unix'),
-    ('pyboard', 'the pyboard'),
-    ('wipy', 'the WiPy'),
-    ('2wipy', 'the WiPy 2.0'),
-    ('lopy', 'the LoPy'),
     ('esp8266', 'the ESP8266'),
+    ('pyboard', 'the pyboard'),
+    ('wipy', 'WiPy'),
+    ('2wipy', 'WiPy 2.0'),
+    ('lopy', 'LoPy'),
+    ('pycom_esp32', 'pycom_esp32')
 ))
+
+url_mapping = (('LoPy', '/pycom_esp32'),
+               ('WiPy 2.0', '/pycom_esp32'),
+               ('WiPy', '/wipy'))
 
 # The members of the html_context dict are available inside topindex.html
 micropy_version = os.getenv('MICROPY_VERSION') or 'latest'
 micropy_all_versions = (os.getenv('MICROPY_ALL_VERSIONS') or 'latest').split(',')
 url_pattern = '%s/en/%%s/%%s' % (os.getenv('MICROPY_URL_PREFIX') or '/',)
 html_context = {
-    'port':micropy_port,
+    'port':ports[micropy_port],
     'port_name':ports[micropy_port],
     'port_version':micropy_version,
     'all_ports':[
-        (port_id, url_pattern % (micropy_version, port_id))
+        (port_name, url_pattern % (micropy_version, port_id))
             for port_id, port_name in ports.items()
     ],
     'all_versions':[
@@ -53,6 +57,7 @@ html_context = {
     'downloads':[
         ('PDF', url_pattern % (micropy_version, 'micropython-%s.pdf' % micropy_port)),
     ],
+    'url_mapping':url_mapping
 }
 
 
@@ -82,7 +87,7 @@ extensions = [
 templates_path = ['templates']
 
 # The suffix of source filenames.
-source_suffix = '.rst'
+source_suffix = ['.rst', '.md']
 
 # The encoding of source files.
 #source_encoding = 'utf-8-sig'
@@ -91,15 +96,15 @@ source_suffix = '.rst'
 #master_doc = 'index'
 
 # General information about the project.
-project = 'MicroPython'
-copyright = '2014-2016, Damien P. George and contributors'
+project = ''
+copyright = '2016, Pycom'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
 # built documents.
 #
 # The short X.Y version.
-version = '1.8'
+version = None
 # The full version, including alpha/beta/rc tags.
 release = '1.8.4'
 
@@ -149,9 +154,9 @@ on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
 
 if not on_rtd:  # only import and set the theme if we're building docs locally
     try:
-        import sphinx_rtd_theme
-        html_theme = 'sphinx_rtd_theme'
-        html_theme_path = [sphinx_rtd_theme.get_html_theme_path(), '.']
+        import sphinx_rtd_pycom_theme
+        html_theme = 'sphinx_rtd_pycom_theme'
+        html_theme_path = [sphinx_rtd_pycom_theme.get_html_theme_path(), '.']
     except:
         html_theme = 'default'
         html_theme_path = ['.']
@@ -171,16 +176,16 @@ else:
 #html_title = None
 
 # A shorter title for the navigation bar.  Default is the same as html_title.
-#html_short_title = None
+html_short_title = "Pycom documentation"
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-#html_logo = '../../logo/trans-logo.png'
+html_logo = '../logo/pycom-web-logo-white.png'
 
 # The name of an image file (within the static path) to use as favicon of the
 # docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
 # pixels large.
-#html_favicon = None
+html_favicon = '../logo/favicon.ico'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -217,10 +222,10 @@ html_additional_pages = {"index": "topindex.html"}
 #html_split_index = False
 
 # If true, links to the reST sources are added to the pages.
-#html_show_sourcelink = True
+html_show_sourcelink = False
 
 # If true, "Created using Sphinx" is shown in the HTML footer. Default is True.
-#html_show_sphinx = True
+html_show_sphinx = False
 
 # If true, "(C) Copyright ..." is shown in the HTML footer. Default is True.
 #html_show_copyright = True
@@ -234,7 +239,7 @@ html_additional_pages = {"index": "topindex.html"}
 #html_file_suffix = None
 
 # Output file base name for HTML help builder.
-htmlhelp_basename = 'MicroPythondoc'
+htmlhelp_basename = 'Pycomdoc'
 
 
 # -- Options for LaTeX output ---------------------------------------------
@@ -317,7 +322,7 @@ texinfo_documents = [
 
 
 # Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {'http://docs.python.org/': None}
+intersphinx_mapping = {'https://docs.python.org/': None}
 
 # Append the other ports' specific folders/files to the exclude pattern
 exclude_patterns.extend([port + '*' for port in ports if port != micropy_port])

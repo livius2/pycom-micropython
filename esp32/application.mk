@@ -19,6 +19,10 @@ APP_INC += -Ibootloader
 APP_INC += -Ifatfs/src/drivers
 APP_INC += -I$(BUILD)
 APP_INC += -I$(BUILD)/genhdr
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bootloader_support/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bootloader_support/include_priv
+APP_INC += -I$(ESP_IDF_COMP_PATH)/mbedtls/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/mbedtls/port/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/driver/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/driver/include/driver
 APP_INC += -I$(ESP_IDF_COMP_PATH)/esp32
@@ -34,9 +38,26 @@ APP_INC += -I$(ESP_IDF_COMP_PATH)/nvs_flash/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/spi_flash/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/tcpip_adapter/include
 APP_INC += -I$(ESP_IDF_COMP_PATH)/log/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/sdmmc/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/device/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/bta/dm
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/bta/hh
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/bta/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/bta/sys/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/stack/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/stack/gatt/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/stack/gap/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/stack/l2cap/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/btcore/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/osi/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/hci/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/gki/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/api/include
+APP_INC += -I$(ESP_IDF_COMP_PATH)/bt/bluedroid/btc/include
 APP_INC += -I../lib/mp-readline
 APP_INC += -I../lib/netutils
-APP_INC += -I../lib/timeutils
 APP_INC += -I../lib/fatfs
 APP_INC += -I../lib
 APP_INC += -I../drivers/sx127x
@@ -46,7 +67,7 @@ APP_MAIN_SRC_C = \
 	main.c \
 	mptask.c \
 	serverstask.c \
-	config.c \
+	pycom_config.c \
 	mpthreadport.c \
 
 APP_HAL_SRC_C = $(addprefix hal/,\
@@ -74,12 +95,13 @@ APP_LIB_SRC_C = $(addprefix lib/,\
 	libm/atan2f.c \
 	mp-readline/readline.c \
 	netutils/netutils.c \
-	timeutils/timeutils.c \
 	utils/pyexec.c \
+	utils/interrupt_char.c \
 	fatfs/ff.c \
 	fatfs/option/ccsbcs.c \
 	)
 
+ifeq ($(BOARD), LOPY)
 APP_MODS_SRC_C = $(addprefix mods/,\
 	machuart.c \
 	machpin.c \
@@ -97,10 +119,50 @@ APP_MODS_SRC_C = $(addprefix mods/,\
 	modlora.c \
 	modpycom.c \
 	moduhashlib.c \
+	moducrypto.c \
+	machtimer.c \
+	machtimer_alarm.c \
+	machtimer_chrono.c \
 	analog.c \
 	pybadc.c \
+	pybdac.c \
+	pybsd.c \
+	modussl.c \
+	modbt.c \
+	modled.c \
 	)
+endif
 
+ifeq ($(BOARD), WIPY)
+APP_MODS_SRC_C = $(addprefix mods/,\
+	machuart.c \
+	machpin.c \
+	machrtc.c \
+	machspi.c \
+	machine_i2c.c \
+	machpwm.c \
+	modmachine.c \
+	moduos.c \
+	modusocket.c \
+	modnetwork.c \
+	modwlan.c \
+	moduselect.c \
+	modutime.c \
+	modpycom.c \
+	moduhashlib.c \
+	moducrypto.c \
+	machtimer.c \
+	machtimer_alarm.c \
+	machtimer_chrono.c \
+	analog.c \
+	pybadc.c \
+	pybdac.c \
+	pybsd.c \
+	modussl.c \
+	modbt.c \
+	modled.c \
+	)
+endif
 
 APP_STM_SRC_C = $(addprefix stmhal/,\
 	bufhelper.c \
@@ -113,6 +175,7 @@ APP_STM_SRC_C = $(addprefix stmhal/,\
 
 APP_UTIL_SRC_C = $(addprefix util/,\
 	antenna.c \
+	btdynmem.c \
 	gccollect.c \
 	help.c \
 	mperror.c \
@@ -122,10 +185,12 @@ APP_UTIL_SRC_C = $(addprefix util/,\
 	socketfifo.c \
 	mpirq.c \
 	mpsleep.c \
+	timeutils.c \
 	)
 
 APP_FATFS_SRC_C = $(addprefix fatfs/src/,\
 	drivers/sflash_diskio.c \
+	drivers/sd_diskio.c \
 	option/syscall.c \
 	diskio.c \
 	ffconf.c \
@@ -133,7 +198,6 @@ APP_FATFS_SRC_C = $(addprefix fatfs/src/,\
 
 APP_LORA_SRC_C = $(addprefix lora/,\
 	utilities.c \
-	rtc-board.c \
 	timer-board.c \
 	gpio-board.c \
 	spi-board.c \
@@ -143,7 +207,6 @@ APP_LORA_SRC_C = $(addprefix lora/,\
 
 APP_LIB_LORA_SRC_C = $(addprefix lib/lora/,\
 	mac/LoRaMac.c \
-	mac/LoRaMac-api-v3.c \
 	mac/LoRaMacCrypto.c \
 	system/delay.c \
 	system/gpio.c \
@@ -207,7 +270,7 @@ else
 endif
 
 # add the application specific CFLAGS
-CFLAGS += $(APP_INC) -DMICROPY_NLR_SETJMP=1 -D$(LORA_BAND)
+CFLAGS += $(APP_INC) -DMICROPY_NLR_SETJMP=1 -D$(LORA_BAND) -DMBEDTLS_CONFIG_FILE='"mbedtls/esp_config.h"' -DHAVE_CONFIG_H -DESP_PLATFORM
 
 # add the application archive, this order is very important
 APP_LIBS = -Wl,--start-group $(LIBS) $(BUILD)/application.a -Wl,--end-group -Wl,-EL
@@ -228,7 +291,7 @@ endif
 $(BUILD)/bootloader/%.o: CFLAGS += -DBOOTLOADER_BUILD
 
 BOOT_OFFSET = 0x1000
-PART_OFFSET = 0x4000
+PART_OFFSET = 0x8000
 APP_OFFSET  = 0x10000
 
 SHELL    = bash
@@ -247,22 +310,26 @@ PART_BIN = $(BUILD)/lib/partitions.bin
 ESPPORT ?= /dev/ttyUSB0
 ESPBAUD ?= 921600
 
+FLASH_SIZE = 4MB
+
 ESPFLASHMODE = qio
 ESPFLASHFREQ = 40m
 ESPTOOLPY = $(PYTHON) $(IDF_PATH)/components/esptool_py/esptool/esptool.py --chip esp32
 ESPTOOLPY_SERIAL = $(ESPTOOLPY) --port $(ESPPORT) --baud $(ESPBAUD)
 
-ESPTOOLPY_WRITE_FLASH  = $(ESPTOOLPY_SERIAL) write_flash -z --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ)
+ESPTOOLPY_WRITE_FLASH  = $(ESPTOOLPY_SERIAL) write_flash -z --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) --flash_size $(FLASH_SIZE)
 ESPTOOLPY_ERASE_FLASH  = $(ESPTOOLPY_SERIAL) erase_flash
 ESPTOOL_ALL_FLASH_ARGS = $(BOOT_OFFSET) $(BOOT_BIN) $(PART_OFFSET) $(PART_BIN) $(APP_OFFSET) $(APP_BIN)
 
 GEN_ESP32PART := $(PYTHON) $(ESP_IDF_COMP_PATH)/partition_table/gen_esp32part.py -q
 
+BOOT_BIN = $(BUILD)/bootloader/bootloader.bin
+
 all: $(BOOT_BIN) $(APP_BIN)
 
 .PHONY: all
 
-$(BUILD)/bootloader/bootloader.a: $(BOOT_OBJ)
+$(BUILD)/bootloader/bootloader.a: $(BOOT_OBJ) sdkconfig.h
 	$(ECHO) "AR $@"
 	$(Q) rm -f $@
 	$(Q) $(AR) cru $@ $^
@@ -274,7 +341,7 @@ $(BUILD)/bootloader/bootloader.elf: $(BUILD)/bootloader/bootloader.a
 
 $(BOOT_BIN): $(BUILD)/bootloader/bootloader.elf
 	$(ECHO) "IMAGE $@"
-	$(Q) $(ESPTOOLPY) elf2image --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) -o $@ $<
+	$(Q) $(ESPTOOLPY) elf2image --flash_mode $(ESPFLASHMODE) --flash_freq $(ESPFLASHFREQ) --flash_size $(FLASH_SIZE) -o $@ $<
 
 $(BUILD)/application.a: $(OBJ)
 	$(ECHO) "AR $@"

@@ -44,13 +44,17 @@
 static void (*HAL_tick_user_cb)(void);
 #endif
 
-#define TIMER_TICKS         80000        // 1 ms @80MHz
+#define TIMER_TICKS             160000        // 1 ms @160MHz
 
 #ifdef LOPY
 static IRAM_ATTR void HAL_TimerCallback (TimerHandle_t xTimer) {
     if (HAL_tick_user_cb) {
         HAL_tick_user_cb();
     }
+    // xthal_set_ccompare(1, xthal_get_ccount() + TIMER_TICKS);
+    // if (HAL_tick_user_cb) {
+    //     HAL_tick_user_cb();
+    // }
 }
 
 void HAL_set_tick_cb (void *cb) {
@@ -63,6 +67,9 @@ void mp_hal_init(bool soft_reset) {
     #ifdef LOPY
         // setup the HAL timer for LoRa
         HAL_tick_user_cb = NULL;
+        // xt_set_interrupt_handler(XCHAL_TIMER_INTERRUPT(1), HAL_TimerCallback, NULL);
+        // xt_ints_on(1 << XCHAL_TIMER_INTERRUPT(1));
+        // xthal_set_ccompare(1, xthal_get_ccount() + TIMER_TICKS);
         TimerHandle_t hal_timer =
                 xTimerCreate("HAL_Timer", 1 / portTICK_PERIOD_MS, pdTRUE, (void *) 0, HAL_TimerCallback);
         xTimerStart (hal_timer, 0);
@@ -75,7 +82,13 @@ void mp_hal_feed_watchdog(void) {
 }
 
 void mp_hal_delay_us(uint32_t us) {
-    ets_delay_us(us);
+    if (us < 1000) {
+        ets_delay_us(us);
+    } else {
+        MP_THREAD_GIL_EXIT();
+        ets_delay_us(us);
+        MP_THREAD_GIL_ENTER();
+    }
 }
 
 int mp_hal_stdin_rx_chr(void) {
@@ -141,21 +154,19 @@ void mp_hal_stdout_tx_strn_cooked(const char *str, uint32_t len) {
 }
 
 uint32_t mp_hal_ticks_ms(void) {
-    return system_get_time() / 1000;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    return now.tv_sec * 1000 + now.tv_usec / 1000;
 }
 
 uint32_t mp_hal_ticks_us(void) {
-    return system_get_time();
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    return now.tv_sec * 1000000 + now.tv_usec;
 }
 
 void mp_hal_delay_ms(uint32_t delay) {
-    // FIXME: Cannot do it like this within interrupts
     MP_THREAD_GIL_EXIT();
     vTaskDelay (delay / portTICK_PERIOD_MS);
     MP_THREAD_GIL_ENTER();
 }
-
-void mp_hal_set_interrupt_char(int c) {
-    mpexception_set_interrupt_char (c);
-}
-

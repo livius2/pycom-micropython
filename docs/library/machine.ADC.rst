@@ -8,53 +8,48 @@ Usage::
    import machine
 
    adc = machine.ADC()             # create an ADC object
-   apin = adc.channel(pin='GP3')   # create an analog pin on GP3
+   apin = adc.channel(pin='P16')   # create an analog pin on P16
    val = apin()                    # read an analog value
 
 Constructors
 ------------
 
-.. class:: ADC(id=0, \*, bits=12)
+.. #todo: document the bits parameter
 
-   Create an ADC object associated with the given pin.
-   This allows you to then read analog values on that pin.
-   For more info check the `pinout and alternate functions
-   table. <https://raw.githubusercontent.com/wipy/wipy/master/docs/PinOUT.png>`_ 
+.. class:: ADC(id=0)
 
-   .. warning:: 
-
-      ADC pin input range is 0-1.4V (being 1.8V the absolute maximum that it 
-      can withstand). When GP2, GP3, GP4 or GP5 are remapped to the 
-      ADC block, 1.8 V is the maximum. If these pins are used in digital mode, 
-      then the maximum allowed input is 3.6V.
+   Create an ADC object, that will let you associate a channel
+   with a pin.
+   For more info check the :ref:`hardware section<hardware>`.
 
 Methods
 -------
 
-.. method:: ADC.channel(id, \*, pin)
+.. method:: adc.init()
 
-   Create an analog pin. If only channel ID is given, the correct pin will
-   be selected. Alternatively, only the pin can be passed and the correct
-   channel will be selected. Examples::
+   Enable the ADC block. This method is automatically called on object creation.
 
-      # all of these are equivalent and enable ADC channel 1 on GP3
-      apin = adc.channel(1)
-      apin = adc.channel(pin='GP3')
-      apin = adc.channel(id=1, pin='GP3')
-
-.. method:: ADC.init()
-
-   Enable the ADC block.
-
-.. method:: ADC.deinit()
+.. method:: adc.deinit()
 
    Disable the ADC block.
 
+.. #todo: original documentation had an id here, but was removed to avoid confusion
+
+.. method:: adc.channel(\*, pin)
+
+   Create an analog pin. ``pin`` is a keyword-only string argument.
+   Returns an instance of :class:`ADCChannel`. Example::
+
+      # enable an ADC channel on P16
+      apin = adc.channel(pin='P16')
+
 class ADCChannel --- read analog values from internal or external sources
-=========================================================================
+-------------------------------------------------------------------------
 
 ADC channels can be connected to internal points of the MCU or to GPIO pins.
 ADC channels are created using the ADC.channel method.
+
+.. comment: the method adcchannel gets modified on runtime by javascript bellow
 
 .. method:: adcchannel()
 
@@ -66,8 +61,18 @@ ADC channels are created using the ADC.channel method.
 
 .. method:: adcchannel.init()
 
-   Re-init (and effectively enable) the ADC channel.
+   (Re)init and enable the ADC channel. This method is automatically called on object creation.
 
 .. method:: adcchannel.deinit()
 
    Disable the ADC channel.
+
+.. raw:: html
+
+    <script>
+        el = document.getElementById('machine.adcchannel').getElementsByClassName('descclassname')[0].innerText = "";
+    </script>
+
+.. warning::
+
+      ADC pin input range is 0-1.1V (being 4.4V the absolute maximum that they can withstand).

@@ -27,12 +27,16 @@
 #include "extmod/machine_mem.h"
 #include "machpin.h"
 #include "machuart.h"
+#include "machtimer.h"
 #include "machine_i2c.h"
 #include "machspi.h"
 #include "machpwm.h"
+#include "machrtc.h"
 #include "mperror.h"
 #include "mpsleep.h"
 #include "pybadc.h"
+#include "pybdac.h"
+#include "pybsd.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -46,22 +50,19 @@
 // Micro Python bindings;
 
 STATIC mp_obj_t machine_reset(void) {
-    system_restart();
+    esp_restart();
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(machine_reset_obj, machine_reset);
 
 STATIC mp_obj_t machine_freq(void) {
-    mp_obj_t tuple[1] = {
-       mp_obj_new_int(/*system_get_cpu_freq()*/80000000),
-    };
-    return mp_obj_new_tuple(1, tuple);
+    return mp_obj_new_int(ets_get_cpu_frequency() * 1000000);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(machine_freq_obj, machine_freq);
 
 STATIC mp_obj_t machine_unique_id(void) {
     uint8_t id[6];
-    system_efuse_read_mac(id);
+    esp_efuse_read_mac(id);
     return mp_obj_new_bytes((byte *)&id, sizeof(id));
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(machine_unique_id_obj, machine_unique_id);
@@ -77,7 +78,7 @@ STATIC mp_obj_t machine_main(mp_obj_t main) {
 MP_DEFINE_CONST_FUN_OBJ_1(machine_main_obj, machine_main);
 
 STATIC mp_obj_t machine_idle(void) {
-    // TODO
+    taskYIELD();
     return mp_const_none;
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(machine_idle_obj, machine_idle);
@@ -146,7 +147,11 @@ STATIC const mp_rom_map_elem_t machine_module_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_SPI),                 (mp_obj_t)&mach_spi_type },
     { MP_OBJ_NEW_QSTR(MP_QSTR_I2C),                 (mp_obj_t)&machine_i2c_type },
     { MP_OBJ_NEW_QSTR(MP_QSTR_PWM),                 (mp_obj_t)&mach_pwm_timer_type },
-	{ MP_OBJ_NEW_QSTR(MP_QSTR_ADC),                 (mp_obj_t)&pyb_adc_type },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ADC),                 (mp_obj_t)&pyb_adc_type },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_DAC),                 (mp_obj_t)&pyb_dac_type },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_SD),                  (mp_obj_t)&pyb_sd_type },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_Timer),               (mp_obj_t)&mach_timer_type },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_RTC),                 (mp_obj_t)&mach_rtc_type },
 
     // constants
     { MP_OBJ_NEW_QSTR(MP_QSTR_PWRON_RESET),         MP_OBJ_NEW_SMALL_INT(MPSLEEP_PWRON_RESET) },

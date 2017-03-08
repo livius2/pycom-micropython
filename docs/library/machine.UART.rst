@@ -8,7 +8,7 @@ the physical level it consists of 2 lines: RXD and TXD.  The unit of communicati
 is a character (not to be confused with a string character) which can be 5, 6, 7 or 8
 bits wide.
 
-UART objects can be created and initialised using::
+UART objects can be created and initialized using::
 
     from machine import UART
 
@@ -26,7 +26,7 @@ UART objects can be created and initialised using::
 
     Bits can be 5, 6, 7, 8.  Parity can be ``None``, ``UART.EVEN`` or ``UART.ODD``.  Stop can be 1 or 2.
 
-.. only:: port_2wipy or port_lopy
+.. only:: port_2wipy or port_lopy or port_pycom_esp32
 
     Bits can be 5, 6, 7, 8.  Parity can be ``None``, ``UART.EVEN`` or ``UART.ODD``.  Stop can be 1, 1.5 or 2.
 
@@ -50,16 +50,27 @@ using the standard stream methods::
 
         uart.any()               # returns True if any characters waiting
 
-.. only:: port_wipy or port_2wipy or port_lopy
+.. only:: port_wipy or port_2wipy or port_lopy or port_pycom_esp32
 
     To check if there is anything to be read, use::
 
         uart.any()               # returns the number of characters available for reading
 
+Quick usage example
+-------------------
+
+    ::
+
+        from machine import UART
+        # this uses the UART_1 default pins for TXD and RXD (``P3`` and ``P4``)
+        uart = UART(1, baudrate=9600)
+        uart.write('hello')
+        uart.read(5) # read up to 5 bytes
+
 Constructors
 ------------
 
-.. only:: port_wipy or port_2wipy or port_lopy
+.. only:: port_wipy or port_2wipy or port_lopy or port_pycom_esp32
 
     .. class:: UART(bus, ...)
 
@@ -70,14 +81,14 @@ Constructors
 Methods
 -------
 
-.. only:: port_wipy
+.. only:: port_wipy or port_lopy or port_2wipy or port_pycom_esp32
 
-    .. method:: UART.init(baudrate=9600, bits=8, parity=None, stop=1, \*, pins=(TXD, RXD, RTS, CTS))
+    .. method:: uart.init(baudrate=9600, bits=8, parity=None, stop=1, \*, pins=(TXD, RXD, RTS, CTS))
 
-       Initialise the UART bus with the given parameters:
+       Initialize the UART bus with the given parameters:
 
          - ``baudrate`` is the clock rate.
-         - ``bits`` is the number of bits per character, 7, 8 or 9.
+         - ``bits`` is the number of bits per character. Can be 5, 6, 7 or 8.
          - ``parity`` is the parity, ``None``, ``UART.EVEN`` or ``UART.ODD``.
          - ``stop`` is the number of stop bits, 1 or 2.
          - ``pins`` is a 4 or 2 item list indicating the TXD, RXD, RTS and CTS pins (in that order).
@@ -88,28 +99,28 @@ Methods
 
 .. only:: not port_esp8266
 
-    .. method:: UART.deinit()
+    .. method:: uart.deinit()
 
        Turn off the UART bus.
 
-    .. method:: UART.any()
+    .. method:: uart.any()
 
        Return the number of characters available for reading.
 
-.. method:: UART.read([nbytes])
+.. method:: uart.read([nbytes])
 
    Read characters.  If ``nbytes`` is specified then read at most that many bytes.
 
    Return value: a bytes object containing the bytes read in.  Returns ``None``
    on timeout.
 
-.. method:: UART.readall()
+.. method:: uart.readall()
 
    Read as much data as possible.
 
    Return value: a bytes object or ``None`` on timeout.
 
-.. method:: UART.readinto(buf[, nbytes])
+.. method:: uart.readinto(buf[, nbytes])
 
    Read bytes into the ``buf``.  If ``nbytes`` is specified then read at most
    that many bytes.  Otherwise, read at most ``len(buf)`` bytes.
@@ -117,13 +128,13 @@ Methods
    Return value: number of bytes read and stored into ``buf`` or ``None`` on
    timeout.
 
-.. method:: UART.readline()
+.. method:: uart.readline()
 
    Read a line, ending in a newline character.
 
    Return value: the line read or ``None`` on timeout.
 
-.. method:: UART.write(buf)
+.. method:: uart.write(buf)
 
    Write the buffer of bytes to the bus.
 
@@ -131,7 +142,7 @@ Methods
 
 .. only:: not port_esp8266 or not port_lopy or not port_2wipy
 
-    .. method:: UART.sendbreak()
+    .. method:: uart.sendbreak()
 
        Send a break condition on the bus.  This drives the bus low for a duration
        of 13 bits.
@@ -139,7 +150,7 @@ Methods
 
 .. only:: port_wipy
 
-    .. method:: UART.irq(trigger, priority=1, handler=None, wake=machine.IDLE)
+    .. method:: uart.irq(trigger, priority=1, handler=None, wake=machine.IDLE)
 
        Create a callback to be triggered when data is received on the UART.
 
@@ -168,7 +179,7 @@ Methods
     ---------
 
     .. data:: UART.EVEN
-    .. data:: UART.ODD
+              UART.ODD
 
         parity types (along with ``None``)
 

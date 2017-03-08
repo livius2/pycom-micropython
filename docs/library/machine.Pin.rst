@@ -8,7 +8,9 @@ general-purpose input/output). It has methods to set
 the mode of the pin (input, output, etc) and methods to get and set the
 digital logic level. For analog control of a pin, see the ADC class.
 
-Usage Model:
+.. only:: not port_pycom_esp32
+
+    Usage Model:
 
 .. only:: port_wipy
 
@@ -40,35 +42,60 @@ Usage Model:
     All pin objects go through the pin mapper to come up with one of the
     gpio pins.
 
-.. only:: port_2wipy or port_lopy
-
-    Module pins are identified by their string id::
-
-        from machine import Pin
-        p = machine.Pin('P10', mode=Pin.OUT, pull=None, drive=Pin.MED_POWER, alt=-1)
-
 .. only:: port_esp8266
 
    ::
 
-    from machine import Pin
+        from machine import Pin
 
-    # create an output pin on GPIO0
-    p0 = Pin(0, Pin.OUT)
-    p0.value(0)
-    p0.value(1)
+        # create an output pin on GPIO0
+        p0 = Pin(0, Pin.OUT)
+        p0.value(0)
+        p0.value(1)
 
-    # create an input pin on GPIO2
-    p2 = Pin(2, Pin.IN, Pin.PULL_UP)
-    print(p2.value())
+        # create an input pin on GPIO2
+        p2 = Pin(2, Pin.IN, Pin.PULL_UP)
+        print(p2.value())
+
+
+Quick usage example
+-------------------
+
+    ::
+
+        from machine import Pin
+
+        # initialize ``P9`` in gpio mode and make it an output
+        p_out = Pin('P9', mode=Pin.OUT)
+        p_out.value(1)
+        p_out.value(0)
+        p_out.toggle()
+        p_out(True)
+
+        # make ``P10`` an input with the pull-up enabled
+        p_in = Pin('P10', mode=Pin.IN, pull=Pin.PULL_UP)
+        p_in() # get value, 0 or 1
 
 Constructors
 ------------
 
 .. class:: Pin(id, ...)
 
+.. only:: not port_pycom_esp32
+
    Create a new Pin object associated with the id.  If additional arguments are given,
-   they are used to initialise the pin.  See :meth:`Pin.init`.
+   they are used to initialize the pin.  See :meth:`Pin.init`.
+
+.. only:: port_pycom_esp32
+
+   Create a new Pin object associated with the string ``id``. If additional arguments are given,
+   they are used to initialize the pin.  See :meth:`Pin.init`.
+
+   ::
+
+        from machine import Pin
+        p = Pin('P10', mode=Pin.OUT, pull=None, alt=-1)
+
 
 Methods
 -------
@@ -77,7 +104,7 @@ Methods
 
     .. method:: Pin.init(mode, pull, \*, drive, alt)
 
-       Initialise the pin:
+       Initialize the pin:
 
          - ``mode`` can be one of:
 
@@ -109,11 +136,11 @@ Methods
 
        Get the pin id.
 
-.. only:: port_2wipy or port_lopy
+.. only:: port_2wipy or port_lopy or port_pycom_esp32
 
-    .. method:: Pin.init(mode, pull, \*, drive, alt)
+    .. method:: pin.init(mode, pull, \*, alt)
 
-       Initialise the pin:
+       Initialize the pin:
 
          - ``mode`` can be one of:
 
@@ -131,15 +158,15 @@ Methods
 
        Returns: ``None``.
 
-    .. method:: Pin.id()
+    .. method:: pin.id()
 
        Get the pin id.
 
 .. only:: port_esp8266
 
-    .. method:: Pin.init(mode, pull=None, \*, value)
+    .. method:: pin.init(mode, pull=None, \*, value)
 
-       Initialise the pin:
+       Initialize the pin:
 
          - `mode` can be one of:
 
@@ -154,7 +181,7 @@ Methods
          - if `value` is given then it is the output value to set the pin
            if it is in output mode.
 
-.. method:: Pin.value([value])
+.. method:: pin.value([value])
 
    Get or set the digital logic level of the pin:
 
@@ -163,10 +190,23 @@ Methods
        anything that converts to a boolean.  If it converts to ``True``, the pin
        is set high, otherwise it is set low.
 
-.. method:: Pin.__call__([value])
+.. method:: pin([value])
 
    Pin objects are callable. The call method provides a (fast) shortcut to set and get the value of the pin.
-   See :func:`Pin.value` for more details.
+
+   Example::
+
+      from machine import Pin
+      pin = Pin('P12', mode=Pin.IN, pull=Pin.PULL_UP)
+      pin()   # fast method to get the value
+
+   See :func:`pin.value` for more details.
+
+.. raw:: html
+
+    <script>
+        el = document.getElementById('machine.pin').getElementsByClassName('descclassname')[0].innerText = "";
+    </script>
 
 .. only:: port_wipy
 
@@ -175,23 +215,59 @@ Methods
         Returns a list of the alternate functions supported by the pin. List items are
         a tuple of the form: ``('ALT_FUN_NAME', ALT_FUN_INDEX)``
 
-.. only:: port_wipy or port_2wipy or port_lopy
+.. only:: port_wipy or port_2wipy or port_lopy or port_pycom_esp32
 
-    .. method:: Pin.toggle()
+    .. method:: pin.toggle()
 
         Toggle the value of the pin.
 
-    .. method:: Pin.mode([mode])
+    .. method:: pin.mode([mode])
 
         Get or set the pin mode.
 
-    .. method:: Pin.pull([pull])
+    .. method:: pin.pull([pull])
 
         Get or set the pin pull.
 
-    .. method:: Pin.drive([drive])
+    .. method:: pin.hold([hold])
 
-        Get or set the pin drive strength.
+        Get or set the pin hold. Can be used to retain the pin state through a core reset and
+        system reset triggered by watchdog time-out or Deep-sleep events.
+
+.. only:: port_pycom_esp32
+
+    .. method:: pin.callback(trigger, handler=None, arg=None)
+
+        Set a callback to be triggered when the input level at the pin changes.
+
+            - ``trigger`` is the type of event that triggers the callback. Possible values are:
+
+                - ``Pin.IRQ_FALLING`` interrupt on falling edge.
+                - ``Pin.IRQ_RISING`` interrupt on rising edge.
+                - ``Pin.IRQ_LOW_LEVEL`` interrupt on low level.
+                - ``Pin.IRQ_HIGH_LEVEL`` interrupt on high level.
+
+              The values can be *ORed* together, for instance trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING
+
+            - ``handler`` is the function to be called when the event happens. This function will receive one argument.
+              Set ``handler`` to ``None`` to disable it.
+
+            - ``arg`` is an optional argument to pass to the callback. If left empty or set to ``None``,
+              the function will receive the ``Pin`` object that triggered it.
+
+        Example::
+
+            from machine import Pin
+
+            def pin_handler(arg):
+                print("got an interrupt in pin %s" % (arg.id()))
+
+            p_in = Pin('P10', mode=Pin.IN, pull=Pin.PULL_UP)
+            p_in.callback(Pin.IRQ_FALLING | Pin.IRQ_RISING, pin_handler)
+
+        .. note::
+
+            For more information on how Pycom's products handle interrupts, see :ref:`here<pycom_interrupt_handling>`.
 
 .. only:: port_wipy
 
@@ -219,7 +295,7 @@ Methods
                 ``GP11``, GP17`` or ``GP24`` can wake the board. Note that only 1
                 of this pins can be enabled as a wake source at the same time, so, only
                 the last enabled pin as a ``machine.Sleep.SUSPENDED`` wake source will have effect.
-              - If ``wake_from=machine.Sleep.SUSPENDED`` pins ``GP2``, ``GP4``, ``GP10``,
+              - If ``wake_from=machine.Sleep.HIBERNATE`` pins ``GP2``, ``GP4``, ``GP10``,
                 ``GP11``, ``GP17`` and ``GP24`` can wake the board. In this case all of the
                 6 pins can be enabled as a ``machine.Sleep.HIBERNATE`` wake source at the same time.
               - Values can be ORed to make a pin generate interrupts in more than one power
@@ -257,9 +333,9 @@ Attributes
             led = Pin(Pin.board.GP25, mode=Pin.OUT)
             Pin.board.GP2.alt_list()
 
-.. only:: port_2wipy or port_lopy
+.. only:: port_2wipy or port_lopy or port_pycom_esp32
 
-    .. class:: Pin.exp_board
+    .. class:: pin.exp_board
 
         Contains all ``Pin`` objects supported by the expansion board. Examples::
 
@@ -267,7 +343,7 @@ Attributes
             led = Pin(Pin.exp_board.G16, mode=Pin.OUT)
             Pin.exp_board.G16.id()
 
-    .. class:: Pin.module
+    .. class:: pin.module
 
         Contains all ``Pin`` objects supported by the module. Examples::
 
@@ -309,7 +385,7 @@ not all constants are available on all ports.
 
        Selects the IRQ trigger type.
 
-.. only:: port_2wipy or port_lopy
+.. only:: port_2wipy or port_lopy or port_pycom_esp32
 
     .. data:: Pin.IN
               Pin.OUT

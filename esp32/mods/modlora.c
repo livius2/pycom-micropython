@@ -26,7 +26,7 @@
 #include "modnetwork.h"
 #include "pybioctl.h"
 #include "modusocket.h"
-#include "config.h"
+#include "pycom_config.h"
 
 #include "lora/mac/LoRaMac.h"
 
@@ -42,6 +42,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/event_groups.h"
 
 #include "lora/mac/LoRaMacTest.h"
 
@@ -67,7 +68,7 @@
 #define LORA_SYMBOL_TIMEOUT                         (5)         // Symbols
 #define LORA_FIX_LENGTH_PAYLOAD_ON                  (true)
 #define LORA_FIX_LENGTH_PAYLOAD_OFF                 (false)
-#define LORA_TX_TIMEOUT_MAX                         (9000000)   // 9 seconds
+#define LORA_TX_TIMEOUT_MAX                         (9500)      // 9.5 seconds
 #define LORA_RX_TIMEOUT                             (0)         // No timeout
 
 // [SF7..SF12]
@@ -76,9 +77,10 @@
 
 #define LORA_CHECK_SOCKET(s)                        if (s->sock_base.sd < 0) {  \
                                                         *_errno = EBADF;        \
+                                                        return -1;              \
                                                     }
 
-#define OVER_THE_AIR_ACTIVATION_DUTYCYCLE           10000000  // 10 [s] value in us
+#define OVER_THE_AIR_ACTIVATION_DUTYCYCLE           15000  // 15 [s] value in ms
 
 #if defined( USE_BAND_868 )
 #define LC4                                         { 867100000, { ( ( DR_5 << 4 ) | DR_0 ) }, 0 }
@@ -101,10 +103,15 @@
 #define LORAWAN_SOCKET_SET_CONFIRMED(sd)            (sd |= 0x80000000)
 #define LORAWAN_SOCKET_CLR_CONFIRMED(sd)            (sd &= ~0x80000000)
 
-#define LORAWAN_SOCKET_SET_PORT(sd, port)           (sd |= (port << 8))
+#define LORAWAN_SOCKET_SET_PORT(sd, port)           (sd &= 0xFFFF00FF); \
+                                                    (sd |= (port << 8))
+
 #define LORAWAN_SOCKET_GET_PORT(sd)                 ((sd >> 8) & 0xFF)
 
-#define LORAWAN_SOCKET_SET_DR(sd, dr)               (sd |= (dr << 16))
+
+#define LORAWAN_SOCKET_SET_DR(sd, dr)               (sd &= 0xFF00FFFF); \
+                                                    (sd |= (dr << 16))
+
 #define LORAWAN_SOCKET_GET_DR(sd)                   ((sd >> 16) & 0xFF)
 
 /******************************************************************************
@@ -119,6 +126,7 @@ typedef enum {
     E_LORA_STATE_NOINIT = 0,
     E_LORA_STATE_IDLE,
     E_LORA_STATE_JOIN,
+    E_LORA_STATE_LINK_CHECK,
     E_LORA_STATE_RX,
     E_LORA_STATE_RX_DONE,
     E_LORA_STATE_RX_TIMEOUT,
@@ -168,27 +176,33 @@ typedef struct {
   uint8_t           sf;
   uint8_t           tx_power;
   uint8_t           pwr_mode;
-  uint8_t           demod_margin;       // for the compliancy tests
-  uint8_t           nbr_gateways;       // for the compliancy tests
+  struct {
+    bool Enabled;
+    bool Running;
+    uint8_t State;
+    bool IsTxConfirmed;
+    uint16_t DownLinkCounter;
+    bool LinkCheck;
+    uint8_t DemodMargin;
+    uint8_t NbGateways;
+  } ComplianceTest;
   uint8_t           activation;
   uint8_t           tx_retries;
   union {
       struct {
-          // For over the air activation
+          // for OTAA
           uint8_t           DevEui[8];
           uint8_t           AppEui[8];
           uint8_t           AppKey[16];
       } otaa;
 
       struct {
-          // For personalization activation
+          // for ABP
           uint32_t          DevAddr;
           uint8_t           NwkSKey[16];
           uint8_t           AppSKey[16];
       } abp;
   };
-  bool              async_tx;
-  bool              is_cmd;
   bool              txiq;
   bool              rxiq;
   bool              adr;
@@ -206,16 +220,15 @@ typedef struct {
 /******************************************************************************
  DECLARE PRIVATE DATA
  ******************************************************************************/
-static lora_cmd_rsp_data_t lora_isr_cmd_rsp_data;
-
 static QueueHandle_t xCmdQueue;
-static QueueHandle_t xRspQueue;
-static QueueHandle_t xDataQueue;
+static QueueHandle_t xRxQueue;
+static EventGroupHandle_t LoRaEvents;
 
 static RadioEvents_t RadioEvents;
 
-static lora_obj_t   lora_obj;
-static lora_partial_rx_packet_t lora_partial_rx_packet;
+static volatile lora_obj_t lora_obj;
+static volatile lora_partial_rx_packet_t lora_partial_rx_packet;
+static volatile lora_rx_data_t rx_data_isr;
 
 static TimerEvent_t TxNextActReqTimer;
 
@@ -235,8 +248,8 @@ static void lora_validate_power (uint8_t tx_power);
 static void lora_validate_bandwidth (uint8_t bandwidth);
 static void lora_validate_sf (uint8_t sf);
 static void lora_validate_coding_rate (uint8_t coding_rate);
-static void lora_get_config (lora_cmd_rsp_data_t *cmd_rsp_data);
-static void lora_send_cmd (lora_cmd_rsp_data_t *cmd_rsp_data);
+static void lora_get_config (lora_cmd_data_t *cmd_data);
+static void lora_send_cmd (lora_cmd_data_t *cmd_data);
 static int32_t lora_send (const byte *buf, uint32_t len, uint32_t timeout_ms);
 static int32_t lora_recv (byte *buf, uint32_t len, int32_t timeout_ms);
 static bool lora_rx_any (void);
@@ -247,6 +260,7 @@ static void lora_socket_close (mod_network_socket_obj_t *s);
 static int lora_socket_send (mod_network_socket_obj_t *s, const byte *buf, mp_uint_t len, int *_errno);
 static int lora_socket_recv (mod_network_socket_obj_t *s, byte *buf, mp_uint_t len, int *_errno);
 static int lora_socket_settimeout (mod_network_socket_obj_t *s, mp_int_t timeout_ms, int *_errno);
+static int lora_socket_bind(mod_network_socket_obj_t *s, byte *ip, mp_uint_t port, int *_errno);
 static int lora_socket_setsockopt(mod_network_socket_obj_t *s, mp_uint_t level, mp_uint_t opt, const void *optval, mp_uint_t optlen, int *_errno);
 static int lora_socket_ioctl (mod_network_socket_obj_t *s, mp_uint_t request, mp_uint_t arg, int *_errno);
 
@@ -254,24 +268,34 @@ static int lora_socket_ioctl (mod_network_socket_obj_t *s, mp_uint_t request, mp
  DEFINE PUBLIC FUNCTIONS
  ******************************************************************************/
 void modlora_init0(void) {
-    xCmdQueue = xQueueCreate(LORA_CMD_RSP_QUEUE_SIZE_MAX, sizeof(lora_cmd_data_t));
-    xRspQueue = xQueueCreate(LORA_CMD_RSP_QUEUE_SIZE_MAX, sizeof(lora_rsp_data_t));
-    xDataQueue = xQueueCreate(LORA_DATA_QUEUE_SIZE_MAX, sizeof(lora_rsp_data_t));
-    xTaskCreate(TASK_LoRa, "LoRa", LORA_STACK_SIZE, NULL, LORA_TASK_PRIORITY, NULL);
+    xCmdQueue = xQueueCreate(LORA_CMD_QUEUE_SIZE_MAX, sizeof(lora_cmd_data_t));
+    xRxQueue = xQueueCreate(LORA_DATA_QUEUE_SIZE_MAX, sizeof(lora_rx_data_t));
+    LoRaEvents = xEventGroupCreate();
+
+    xTaskCreate(TASK_LoRa, "LoRa", LORA_STACK_SIZE / sizeof(StackType_t), NULL, LORA_TASK_PRIORITY, NULL);
 }
 
 /******************************************************************************
  DEFINE PRIVATE FUNCTIONS
  ******************************************************************************/
-static int32_t lorawan_send (const byte *buf, uint32_t len, uint32_t timeout_ms, bool confirmed, uint8_t dr) {
-    lora_cmd_rsp_data_t cmd_rsp_data;
+static int32_t lorawan_send (const byte *buf, uint32_t len, uint32_t timeout_ms, bool confirmed, uint32_t dr, uint32_t port) {
+    lora_cmd_data_t cmd_data;
 
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_LORAWAN_TX;
-    memcpy (cmd_rsp_data.cmd_u.info.tx.data, buf, len);
-    cmd_rsp_data.cmd_u.info.tx.len = len;
-    cmd_rsp_data.cmd_u.info.tx.async = (timeout_ms == 0);
-    cmd_rsp_data.cmd_u.info.tx.confirmed = confirmed;
-    cmd_rsp_data.cmd_u.info.tx.dr = dr;
+    cmd_data.cmd = E_LORA_CMD_LORAWAN_TX;
+    memcpy (cmd_data.info.tx.data, buf, len);
+    cmd_data.info.tx.len = len;
+    cmd_data.info.tx.dr = dr;
+    if (lora_obj.ComplianceTest.Enabled && lora_obj.ComplianceTest.Running) {
+        cmd_data.info.tx.port = 224;  // MAC commands port
+        if (lora_obj.ComplianceTest.IsTxConfirmed) {
+            cmd_data.info.tx.confirmed = true;
+        } else {
+            cmd_data.info.tx.confirmed = false;
+        }
+    } else {
+        cmd_data.info.tx.confirmed = confirmed;
+        cmd_data.info.tx.port = port;    // data port
+    }
 
     if (timeout_ms < 0) {
         // blocking mode
@@ -279,17 +303,18 @@ static int32_t lorawan_send (const byte *buf, uint32_t len, uint32_t timeout_ms,
     }
 
     // just pass to the LoRa queue
-    if (!xQueueSend(xCmdQueue, (void *)&cmd_rsp_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
+    if (!xQueueSend(xCmdQueue, (void *)&cmd_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
         return 0;
     }
 
     if (timeout_ms != 0) {
-        // block until receiving a response back
-        xQueueReceive(xRspQueue, &cmd_rsp_data, (TickType_t)portMAX_DELAY);
-        if (cmd_rsp_data.rsp_u.rsp != E_LORA_CMD_RSP || cmd_rsp_data.rsp_u.info.rsp.result == E_LORA_CMD_ERROR) {
+        uint32_t result = xEventGroupWaitBits(LoRaEvents,
+                                              LORA_STATUS_COMPLETED | LORA_STATUS_ERROR,
+                                              pdTRUE,   // clear on exit
+                                              pdFALSE,  // do not wait for all bits
+                                              (TickType_t)portMAX_DELAY);
+        if (result & LORA_STATUS_ERROR) {
             return -1;
-        } else if (cmd_rsp_data.rsp_u.info.rsp.result == E_LORA_CMD_AGAIN) {
-            return 0;
         }
     }
     // return the number of bytes sent
@@ -297,6 +322,7 @@ static int32_t lorawan_send (const byte *buf, uint32_t len, uint32_t timeout_ms,
 }
 
 static IRAM_ATTR void McpsConfirm (McpsConfirm_t *McpsConfirm) {
+    uint32_t status = LORA_STATUS_COMPLETED;
     if (McpsConfirm->Status == LORAMAC_EVENT_INFO_STATUS_OK) {
         switch (McpsConfirm->McpsRequest) {
             case MCPS_UNCONFIRMED:
@@ -314,16 +340,11 @@ static IRAM_ATTR void McpsConfirm (McpsConfirm_t *McpsConfirm) {
             default:
                 break;
         }
-        // frame sending succeded
-        lora_isr_cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
     } else {
-        lora_isr_cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_AGAIN;
-    }
-    if (!lora_obj.async_tx) {
-        lora_isr_cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-        xQueueSend(xRspQueue, (void *)&lora_isr_cmd_rsp_data, 0);
+        status |= LORA_STATUS_ERROR;
     }
     lora_obj.state = E_LORA_STATE_IDLE;
+    xEventGroupSetBits(LoRaEvents, status);
 }
 
 static void McpsIndication (McpsIndication_t *mcpsIndication) {
@@ -356,31 +377,138 @@ static void McpsIndication (McpsIndication_t *mcpsIndication) {
 
     lora_obj.rssi = mcpsIndication->Rssi;
 
+    if (lora_obj.ComplianceTest.Running == true) {
+        lora_obj.ComplianceTest.DownLinkCounter++;
+    }
+
+    // printf("MCPS indication!=%d :%d\n", mcpsIndication->BufferSize, mcpsIndication->Port);
+
     if (mcpsIndication->RxData) {
         switch (mcpsIndication->Port) {
         case 1:
         case 2:
+            if (mcpsIndication->BufferSize <= LORA_PAYLOAD_SIZE_MAX) {
+                memcpy((void *)rx_data_isr.data, mcpsIndication->Buffer, mcpsIndication->BufferSize);
+                rx_data_isr.len = mcpsIndication->BufferSize;
+                xQueueSendFromISR(xRxQueue, (void *)&rx_data_isr, NULL);
+            }
+            // printf("Data on port 2 received\n");
+            break;
+        case 224:
+            if (lora_obj.ComplianceTest.Enabled == true) {
+                if (lora_obj.ComplianceTest.Running == false) {
+                    // printf("Checking start test msg\n");
+                    // Check compliance test enable command (i)
+                    if( ( mcpsIndication->BufferSize == 4 ) &&
+                        ( mcpsIndication->Buffer[0] == 0x01 ) &&
+                        ( mcpsIndication->Buffer[1] == 0x01 ) &&
+                        ( mcpsIndication->Buffer[2] == 0x01 ) &&
+                        ( mcpsIndication->Buffer[3] == 0x01 ) )
+                    {
+                        lora_obj.ComplianceTest.IsTxConfirmed = false;
+                        lora_obj.ComplianceTest.DownLinkCounter = 0;
+                        lora_obj.ComplianceTest.LinkCheck = false;
+                        lora_obj.ComplianceTest.DemodMargin = 0;
+                        lora_obj.ComplianceTest.NbGateways = 0;
+                        lora_obj.ComplianceTest.Running = true;
+                        lora_obj.ComplianceTest.State = 1;
+
+                        // flush the rx queue
+                        xQueueReset(xRxQueue);
+
+                        // enable ADR during test mode
+                        MibRequestConfirm_t mibReq;
+                        mibReq.Type = MIB_ADR;
+                        mibReq.Param.AdrEnable = true;
+                        LoRaMacMibSetRequestConfirm( &mibReq );
+
+                    #if defined(USE_BAND_868)
+                        // always disable duty cycle limitation during test mode
+                        LoRaMacTestSetDutyCycleOn(false);
+                    #endif
+                        // printf("Compliance enabled\n");
+                    }
+                } else {
+                    lora_obj.ComplianceTest.State = mcpsIndication->Buffer[0];
+                    switch (lora_obj.ComplianceTest.State) {
+                    case 0: // Check compliance test disable command (ii)
+                        lora_obj.ComplianceTest.IsTxConfirmed = false;
+                        lora_obj.ComplianceTest.DownLinkCounter = 0;
+                        lora_obj.ComplianceTest.Running = false;
+
+                        // set adr back to its original value
+                        MibRequestConfirm_t mibReq;
+                        mibReq.Type = MIB_ADR;
+                        mibReq.Param.AdrEnable = lora_obj.adr;
+                        LoRaMacMibSetRequestConfirm(&mibReq);
+                    #if defined( USE_BAND_868 )
+                        LoRaMacTestSetDutyCycleOn(true);
+                    #endif
+                        // printf("Compliance disabled\n");
+                        break;
+                    case 1: // (iii, iv)
+                        lora_obj.ComplianceTest.Running = true;
+                        // printf("Compliance running\n");
+                        break;
+                    case 2: // Enable confirmed messages (v)
+                        lora_obj.ComplianceTest.IsTxConfirmed = true;
+                        lora_obj.ComplianceTest.State = 1;
+                        // printf("Confirmed messages enabled\n");
+                        break;
+                    case 3:  // Disable confirmed messages (vi)
+                        lora_obj.ComplianceTest.IsTxConfirmed = false;
+                        lora_obj.ComplianceTest.State = 1;
+                        // printf("Confirmed messages disabled\n");
+                        break;
+                    case 4: // (vii)
+                        // return the payload
+                        if (mcpsIndication->BufferSize <= LORA_PAYLOAD_SIZE_MAX) {
+                            memcpy((void *)rx_data_isr.data, mcpsIndication->Buffer, mcpsIndication->BufferSize);
+                            rx_data_isr.len = mcpsIndication->BufferSize;
+                            xQueueSendFromISR(xRxQueue, (void *)&rx_data_isr, NULL);
+                        }
+                        // printf("Crypto message received\n");
+                        break;
+                    case 5: // (viii)
+                        // trigger a link check
+                        lora_obj.state = E_LORA_STATE_LINK_CHECK;
+                        // printf("Link check\n");
+                        break;
+                    case 6: // (ix)
+                        // trigger a join request
+                        lora_obj.ComplianceTest.State = 6;
+                        lora_obj.state = E_LORA_STATE_JOIN;
+                        // printf("Trigger join\n");
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
             break;
         default:
             break;
         }
-        if (mcpsIndication->BufferSize <= LORA_PAYLOAD_SIZE_MAX) {
-            lora_isr_cmd_rsp_data.rsp_u.rsp = E_LORA_RX_DATA;
-            memcpy(lora_isr_cmd_rsp_data.rsp_u.info.rx.data, mcpsIndication->Buffer, mcpsIndication->BufferSize);
-            lora_isr_cmd_rsp_data.rsp_u.info.rx.len = mcpsIndication->BufferSize;
-            xQueueSend(xDataQueue, (void *)&lora_isr_cmd_rsp_data, 0);
-        }
     }
 }
 
-static IRAM_ATTR void MlmeConfirm (MlmeConfirm_t *MlmeConfirm) {
+static void MlmeConfirm (MlmeConfirm_t *MlmeConfirm) {
     if (MlmeConfirm->Status == LORAMAC_EVENT_INFO_STATUS_OK) {
         switch (MlmeConfirm->MlmeRequest) {
             case MLME_JOIN:
                 TimerStop(&TxNextActReqTimer);
                 lora_obj.joined = true;
+                lora_obj.ComplianceTest.State = 1;
                 break;
             case MLME_LINK_CHECK:
+                // Check DemodMargin
+                // Check NbGateways
+                if (lora_obj.ComplianceTest.Running == true) {
+                    lora_obj.ComplianceTest.LinkCheck = true;
+                    lora_obj.ComplianceTest.DemodMargin = MlmeConfirm->DemodMargin;
+                    lora_obj.ComplianceTest.NbGateways = MlmeConfirm->NbGateways;
+                }
+                // printf("Link check confirm\n");
                 break;
             default:
                 break;
@@ -407,21 +535,21 @@ static void OnTxNextActReqTimerEvent(void) {
 }
 
 static void TASK_LoRa (void *pvParameters) {
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
     lora_obj.state = E_LORA_STATE_NOINIT;
-    lora_obj.async_tx = false;
     lora_obj.pwr_mode = E_LORA_MODE_ALWAYS_ON;
 
     LoRaMacPrimitives_t LoRaMacPrimitives;
     LoRaMacCallback_t LoRaMacCallbacks;
     MibRequestConfirm_t mibReq;
+    MlmeReq_t mlmeReq;
 
     // target board initialisation
     BoardInitMcu();
     BoardInitPeriph();
 
     for ( ; ; ) {
-        vTaskDelay (1 / portTICK_PERIOD_MS);
+        vTaskDelay (2 / portTICK_PERIOD_MS);
 
         switch (lora_obj.state) {
         case E_LORA_STATE_NOINIT:
@@ -429,11 +557,11 @@ static void TASK_LoRa (void *pvParameters) {
         case E_LORA_STATE_RX:
         case E_LORA_STATE_SLEEP:
             // receive from the command queue and act accordingly
-            if (xQueueReceive(xCmdQueue, &cmd_rsp_data, 0)) {
-                switch (cmd_rsp_data.cmd_u.cmd) {
+            if (xQueueReceive(xCmdQueue, &cmd_data, 0)) {
+                switch (cmd_data.cmd) {
                 case E_LORA_CMD_INIT:
-                    lora_obj.stack_mode = cmd_rsp_data.cmd_u.info.init.stack_mode;
-                    if (cmd_rsp_data.cmd_u.info.init.stack_mode == E_LORA_STACK_MODE_LORAWAN) {
+                    lora_obj.stack_mode = cmd_data.info.init.stack_mode;
+                    if (cmd_data.info.init.stack_mode == E_LORA_STACK_MODE_LORAWAN) {
                         LoRaMacPrimitives.MacMcpsConfirm = McpsConfirm;
                         LoRaMacPrimitives.MacMcpsIndication = McpsIndication;
                         LoRaMacPrimitives.MacMlmeConfirm = MlmeConfirm;
@@ -443,28 +571,17 @@ static void TASK_LoRa (void *pvParameters) {
                         TimerInit(&TxNextActReqTimer, OnTxNextActReqTimerEvent);
 
                         mibReq.Type = MIB_ADR;
-                        mibReq.Param.AdrEnable = cmd_rsp_data.cmd_u.info.init.adr;
+                        mibReq.Param.AdrEnable = cmd_data.info.init.adr;
                         LoRaMacMibSetRequestConfirm(&mibReq);
 
                         mibReq.Type = MIB_PUBLIC_NETWORK;
-                        mibReq.Param.EnablePublicNetwork = cmd_rsp_data.cmd_u.info.init.public;
+                        mibReq.Param.EnablePublicNetwork = cmd_data.info.init.public;
                         LoRaMacMibSetRequestConfirm(&mibReq);
 
-                   #if defined( USE_BAND_868 )
-                       LoRaMacTestSetDutyCycleOn(false);   // Test only
-                       LoRaMacChannelAdd(3, (ChannelParams_t)LC4);
-                       LoRaMacChannelAdd(4, (ChannelParams_t)LC5);
-                       LoRaMacChannelAdd(5, (ChannelParams_t)LC6);
-                       LoRaMacChannelAdd(6, (ChannelParams_t)LC7);
-                       LoRaMacChannelAdd(7, (ChannelParams_t)LC8);
-                       LoRaMacChannelAdd(8, (ChannelParams_t)LC9);
-                       LoRaMacChannelAdd(9, (ChannelParams_t)LC10);
-                   #endif
-
                         // copy the configuration (must be done before sending the response)
-                        lora_obj.adr = cmd_rsp_data.cmd_u.info.init.adr;
-                        lora_obj.public = cmd_rsp_data.cmd_u.info.init.public;
-                        lora_obj.tx_retries = cmd_rsp_data.cmd_u.info.init.tx_retries;
+                        lora_obj.adr = cmd_data.info.init.adr;
+                        lora_obj.public = cmd_data.info.init.public;
+                        lora_obj.tx_retries = cmd_data.info.init.tx_retries;
                         lora_obj.frequency = RF_FREQUENCY_CENTER;
                         lora_obj.state = E_LORA_STATE_IDLE;
                     } else {
@@ -476,17 +593,17 @@ static void TASK_LoRa (void *pvParameters) {
                         RadioEvents.RxError = OnRxError;
                         Radio.Init(&RadioEvents);
 
-                        lora_setup(&cmd_rsp_data.cmd_u.info.init);
+                        lora_setup(&cmd_data.info.init);
                         // copy the configuration (must be done before sending the response)
-                        lora_obj.bandwidth = cmd_rsp_data.cmd_u.info.init.bandwidth;
-                        lora_obj.coding_rate = cmd_rsp_data.cmd_u.info.init.coding_rate;
-                        lora_obj.frequency = cmd_rsp_data.cmd_u.info.init.frequency;
-                        lora_obj.preamble = cmd_rsp_data.cmd_u.info.init.preamble;
-                        lora_obj.rxiq = cmd_rsp_data.cmd_u.info.init.rxiq;
-                        lora_obj.txiq = cmd_rsp_data.cmd_u.info.init.txiq;
-                        lora_obj.sf = cmd_rsp_data.cmd_u.info.init.sf;
-                        lora_obj.tx_power = cmd_rsp_data.cmd_u.info.init.tx_power;
-                        lora_obj.pwr_mode = cmd_rsp_data.cmd_u.info.init.power_mode;
+                        lora_obj.bandwidth = cmd_data.info.init.bandwidth;
+                        lora_obj.coding_rate = cmd_data.info.init.coding_rate;
+                        lora_obj.frequency = cmd_data.info.init.frequency;
+                        lora_obj.preamble = cmd_data.info.init.preamble;
+                        lora_obj.rxiq = cmd_data.info.init.rxiq;
+                        lora_obj.txiq = cmd_data.info.init.txiq;
+                        lora_obj.sf = cmd_data.info.init.sf;
+                        lora_obj.tx_power = cmd_data.info.init.tx_power;
+                        lora_obj.pwr_mode = cmd_data.info.init.power_mode;
                         if (lora_obj.pwr_mode == E_LORA_MODE_ALWAYS_ON) {
                             // start listening
                             Radio.Rx(LORA_RX_TIMEOUT);
@@ -497,32 +614,35 @@ static void TASK_LoRa (void *pvParameters) {
                         }
                     }
                     lora_obj.joined = false;
-                    // send back the command response
-                    cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                    cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                    xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
+                    xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
                     break;
                 case E_LORA_CMD_JOIN:
-                    lora_obj.activation = cmd_rsp_data.cmd_u.info.join.activation;
-                    lora_obj.is_cmd = true;
+                    lora_obj.joined = false;
+                    lora_obj.activation = cmd_data.info.join.activation;
+                    if (lora_obj.activation == E_LORA_ACTIVATION_OTAA) {
+                        memcpy((void *)lora_obj.otaa.DevEui, cmd_data.info.join.otaa.DevEui, sizeof(lora_obj.otaa.DevEui));
+                        memcpy((void *)lora_obj.otaa.AppEui, cmd_data.info.join.otaa.AppEui, sizeof(lora_obj.otaa.AppEui));
+                        memcpy((void *)lora_obj.otaa.AppKey, cmd_data.info.join.otaa.AppKey, sizeof(lora_obj.otaa.AppKey));
+                    } else {
+                        lora_obj.abp.DevAddr = cmd_data.info.join.abp.DevAddr;
+                        memcpy((void *)lora_obj.abp.AppSKey, cmd_data.info.join.abp.AppSKey, sizeof(lora_obj.abp.AppSKey));
+                        memcpy((void *)lora_obj.abp.NwkSKey, cmd_data.info.join.abp.NwkSKey, sizeof(lora_obj.abp.NwkSKey));
+                    }
                     lora_obj.state = E_LORA_STATE_JOIN;
                     break;
                 case E_LORA_CMD_TX:
-                    Radio.Send(cmd_rsp_data.cmd_u.info.tx.data, cmd_rsp_data.cmd_u.info.tx.len);
-                    lora_obj.async_tx = cmd_rsp_data.cmd_u.info.tx.async;
+                    Radio.Send(cmd_data.info.tx.data, cmd_data.info.tx.len);
                     lora_obj.state = E_LORA_STATE_TX;
                     break;
                 case E_LORA_CMD_CONFIG_CHANNEL:
-                    if (cmd_rsp_data.cmd_u.info.channel.add) {
+                    if (cmd_data.info.channel.add) {
                         ChannelParams_t channel =
-                        { cmd_rsp_data.cmd_u.info.channel.frequency, {((cmd_rsp_data.cmd_u.info.channel.dr_max << 4) | cmd_rsp_data.cmd_u.info.channel.dr_min)}, 0};
-                        LoRaMacChannelAdd(cmd_rsp_data.cmd_u.info.channel.index, channel);
+                        { cmd_data.info.channel.frequency, {((cmd_data.info.channel.dr_max << 4) | cmd_data.info.channel.dr_min)}, 0};
+                        LoRaMacChannelManualAdd(cmd_data.info.channel.index, channel);
                     } else {
-                        LoRaMacChannelRemove(cmd_rsp_data.cmd_u.info.channel.index);
+                        LoRaMacChannelManualRemove(cmd_data.info.channel.index);
                     }
-                    cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                    cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                    xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
+                    xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
                     break;
                 case E_LORA_CMD_LORAWAN_TX:
                     {
@@ -530,39 +650,34 @@ static void TASK_LoRa (void *pvParameters) {
                         LoRaMacTxInfo_t txInfo;
                         bool empty_frame = false;
 
-                        lora_obj.async_tx = cmd_rsp_data.cmd_u.info.tx.async;
-                        if (LoRaMacQueryTxPossible (cmd_rsp_data.cmd_u.info.tx.len, &txInfo) != LORAMAC_STATUS_OK) {
+                        if (LoRaMacQueryTxPossible (cmd_data.info.tx.len, &txInfo) != LORAMAC_STATUS_OK) {
                             // send an empty frame in order to flush MAC commands
                             mcpsReq.Type = MCPS_UNCONFIRMED;
                             mcpsReq.Req.Unconfirmed.fBuffer = NULL;
                             mcpsReq.Req.Unconfirmed.fBufferSize = 0;
-                            mcpsReq.Req.Unconfirmed.Datarate = cmd_rsp_data.cmd_u.info.tx.dr;
+                            mcpsReq.Req.Unconfirmed.Datarate = cmd_data.info.tx.dr;
                             empty_frame = true;
                         } else {
-                            if (cmd_rsp_data.cmd_u.info.tx.confirmed) {
+                            if (cmd_data.info.tx.confirmed) {
                                 mcpsReq.Type = MCPS_CONFIRMED;
-                                mcpsReq.Req.Confirmed.fPort = cmd_rsp_data.cmd_u.info.tx.port;
-                                mcpsReq.Req.Confirmed.fBuffer = cmd_rsp_data.cmd_u.info.tx.data;
-                                mcpsReq.Req.Confirmed.fBufferSize = cmd_rsp_data.cmd_u.info.tx.len;
+                                mcpsReq.Req.Confirmed.fPort = cmd_data.info.tx.port;
+                                mcpsReq.Req.Confirmed.fBuffer = cmd_data.info.tx.data;
+                                mcpsReq.Req.Confirmed.fBufferSize = cmd_data.info.tx.len;
                                 mcpsReq.Req.Confirmed.NbTrials = lora_obj.tx_retries + 1;
-                                mcpsReq.Req.Confirmed.Datarate = cmd_rsp_data.cmd_u.info.tx.dr;
+                                mcpsReq.Req.Confirmed.Datarate = cmd_data.info.tx.dr;
                             } else {
                                 mcpsReq.Type = MCPS_UNCONFIRMED;
-                                mcpsReq.Req.Unconfirmed.fPort = cmd_rsp_data.cmd_u.info.tx.port;
-                                mcpsReq.Req.Unconfirmed.fBuffer = cmd_rsp_data.cmd_u.info.tx.data;
-                                mcpsReq.Req.Unconfirmed.fBufferSize = cmd_rsp_data.cmd_u.info.tx.len;
-                                mcpsReq.Req.Unconfirmed.Datarate = cmd_rsp_data.cmd_u.info.tx.dr;
+                                mcpsReq.Req.Unconfirmed.fPort = cmd_data.info.tx.port;
+                                mcpsReq.Req.Unconfirmed.fBuffer = cmd_data.info.tx.data;
+                                mcpsReq.Req.Unconfirmed.fBufferSize = cmd_data.info.tx.len;
+                                mcpsReq.Req.Unconfirmed.Datarate = cmd_data.info.tx.dr;
                             }
                         }
 
                         if (LoRaMacMcpsRequest(&mcpsReq) != LORAMAC_STATUS_OK || empty_frame) {
                             // the command has failed, send the response now
                             lora_obj.state = E_LORA_STATE_IDLE;
-                            if (!lora_obj.async_tx) {
-                                cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                                cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_ERROR;
-                                xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
-                            }
+                            xEventGroupSetBits(LoRaEvents, LORA_STATUS_ERROR);
                         } else {
                             lora_obj.state = E_LORA_STATE_TX;
                         }
@@ -571,17 +686,13 @@ static void TASK_LoRa (void *pvParameters) {
                 case E_LORA_CMD_SLEEP:
                     Radio.Sleep();
                     lora_obj.state = E_LORA_STATE_SLEEP;
-                    cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                    cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                    xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
+                    xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
                     break;
                 case E_LORA_CMD_WAKE_UP:
                     // just enable the receiver again
                     Radio.Rx(LORA_RX_TIMEOUT);
                     lora_obj.state = E_LORA_STATE_RX;
-                    cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                    cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                    xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
+                    xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
                     break;
                 default:
                     break;
@@ -594,50 +705,42 @@ static void TASK_LoRa (void *pvParameters) {
         case E_LORA_STATE_JOIN:
             TimerStop( &TxNextActReqTimer );
             if (lora_obj.activation == E_LORA_ACTIVATION_OTAA) {
-                lora_obj.joined = false;
-                memcpy(lora_obj.otaa.DevEui, cmd_rsp_data.cmd_u.info.join.otaa.DevEui, sizeof(lora_obj.otaa.DevEui));
-                memcpy(lora_obj.otaa.AppEui, cmd_rsp_data.cmd_u.info.join.otaa.AppEui, sizeof(lora_obj.otaa.AppEui));
-                memcpy(lora_obj.otaa.AppKey, cmd_rsp_data.cmd_u.info.join.otaa.AppKey, sizeof(lora_obj.otaa.AppKey));
-                MlmeReq_t mlmeReq;
                 mlmeReq.Type = MLME_JOIN;
-                mlmeReq.Req.Join.DevEui = lora_obj.otaa.DevEui;
-                mlmeReq.Req.Join.AppEui = lora_obj.otaa.AppEui;
-                mlmeReq.Req.Join.AppKey = lora_obj.otaa.AppKey;
+                mlmeReq.Req.Join.DevEui = (uint8_t *)lora_obj.otaa.DevEui;
+                mlmeReq.Req.Join.AppEui = (uint8_t *)lora_obj.otaa.AppEui;
+                mlmeReq.Req.Join.AppKey = (uint8_t *)lora_obj.otaa.AppKey;
                 LoRaMacMlmeRequest(&mlmeReq);
                 TimerSetValue( &TxNextActReqTimer, OVER_THE_AIR_ACTIVATION_DUTYCYCLE);
                 TimerStart( &TxNextActReqTimer );
             } else {
-                lora_obj.abp.DevAddr = cmd_rsp_data.cmd_u.info.join.abp.DevAddr;
-                memcpy(lora_obj.abp.AppSKey, cmd_rsp_data.cmd_u.info.join.abp.AppSKey, sizeof(lora_obj.abp.AppSKey));
-                memcpy(lora_obj.abp.NwkSKey, cmd_rsp_data.cmd_u.info.join.abp.NwkSKey, sizeof(lora_obj.abp.NwkSKey));
                 mibReq.Type = MIB_NET_ID;
                 mibReq.Param.NetID = DEF_LORAWAN_NETWORK_ID;
                 LoRaMacMibSetRequestConfirm( &mibReq );
 
                 mibReq.Type = MIB_DEV_ADDR;
-                mibReq.Param.DevAddr = lora_obj.abp.DevAddr;
+                mibReq.Param.DevAddr = (uint32_t)lora_obj.abp.DevAddr;
                 LoRaMacMibSetRequestConfirm( &mibReq );
 
                 mibReq.Type = MIB_NWK_SKEY;
-                mibReq.Param.NwkSKey = lora_obj.abp.NwkSKey;
+                mibReq.Param.NwkSKey = (uint8_t *)lora_obj.abp.NwkSKey;
                 LoRaMacMibSetRequestConfirm( &mibReq );
 
                 mibReq.Type = MIB_APP_SKEY;
-                mibReq.Param.AppSKey = lora_obj.abp.AppSKey;
+                mibReq.Param.AppSKey = (uint8_t *)lora_obj.abp.AppSKey;
                 LoRaMacMibSetRequestConfirm( &mibReq );
 
                 mibReq.Type = MIB_NETWORK_JOINED;
                 mibReq.Param.IsNetworkJoined = true;
                 LoRaMacMibSetRequestConfirm( &mibReq );
                 lora_obj.joined = true;
+                lora_obj.ComplianceTest.State = 1;
             }
-            if (lora_obj.is_cmd) {
-                lora_obj.is_cmd = false;
-                // send back the command response
-                cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
-            }
+            xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
+            lora_obj.state = E_LORA_STATE_IDLE;
+            break;
+        case E_LORA_STATE_LINK_CHECK:
+            mlmeReq.Type = MLME_LINK_CHECK;
+            LoRaMacMlmeRequest(&mlmeReq);
             lora_obj.state = E_LORA_STATE_IDLE;
             break;
         case E_LORA_STATE_RX_DONE:
@@ -652,23 +755,13 @@ static void TASK_LoRa (void *pvParameters) {
         case E_LORA_STATE_TX_DONE:
             // we need to perform a mode transition in order to clear the TxRx FIFO
             Radio.Sleep();
-            // send back the command response
-            if (!lora_obj.async_tx) {
-                cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_OK;
-                xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
-            }
+            xEventGroupSetBits(LoRaEvents, LORA_STATUS_COMPLETED);
             lora_obj.state = E_LORA_STATE_IDLE;
             break;
         case E_LORA_STATE_TX_TIMEOUT:
             // we need to perform a mode transition in order to clear the TxRx FIFO
             Radio.Sleep();
-            // send back the command response
-            if (!lora_obj.async_tx) {
-                cmd_rsp_data.rsp_u.rsp = E_LORA_CMD_RSP;
-                cmd_rsp_data.rsp_u.info.rsp.result = E_LORA_CMD_ERROR;
-                xQueueSend(xRspQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
-            }
+            xEventGroupSetBits(LoRaEvents, LORA_STATUS_ERROR);
             lora_obj.state = E_LORA_STATE_IDLE;
             break;
         default:
@@ -686,10 +779,9 @@ static IRAM_ATTR void OnRxDone (uint8_t *payload, uint16_t size, int16_t rssi, i
     lora_obj.state = E_LORA_STATE_RX_DONE;
     lora_obj.rssi = rssi;
     if (size <= LORA_PAYLOAD_SIZE_MAX) {
-        lora_isr_cmd_rsp_data.rsp_u.rsp = E_LORA_RX_DATA;
-        memcpy(lora_isr_cmd_rsp_data.rsp_u.info.rx.data, payload, size);
-        lora_isr_cmd_rsp_data.rsp_u.info.rx.len = size;
-        xQueueSendFromISR(xDataQueue, (void *)&lora_isr_cmd_rsp_data, NULL);
+        memcpy((void *)rx_data_isr.data, payload, size);
+        rx_data_isr.len = size;
+        xQueueSendFromISR(xRxQueue, (void *)&rx_data_isr, NULL);
     }
 }
 
@@ -737,7 +829,7 @@ static void lora_validate_power (uint8_t tx_power) {
     }
 }
 
-static bool lora_validate_data_rate (uint8_t data_rate) {
+static bool lora_validate_data_rate (uint32_t data_rate) {
 #if defined(USE_BAND_868)
     if (data_rate > DR_7) {
         return false;
@@ -778,35 +870,38 @@ static void lora_validate_power_mode (uint8_t power_mode) {
     }
 }
 
-static void lora_get_config (lora_cmd_rsp_data_t *cmd_rsp_data) {
-    cmd_rsp_data->cmd_u.info.init.bandwidth = lora_obj.bandwidth;
-    cmd_rsp_data->cmd_u.info.init.coding_rate = lora_obj.coding_rate;
-    cmd_rsp_data->cmd_u.info.init.frequency = lora_obj.frequency;
-    cmd_rsp_data->cmd_u.info.init.preamble = lora_obj.preamble;
-    cmd_rsp_data->cmd_u.info.init.rxiq = lora_obj.rxiq;
-    cmd_rsp_data->cmd_u.info.init.txiq = lora_obj.txiq;
-    cmd_rsp_data->cmd_u.info.init.sf = lora_obj.sf;
-    cmd_rsp_data->cmd_u.info.init.tx_power = lora_obj.tx_power;
-    cmd_rsp_data->cmd_u.info.init.power_mode = lora_obj.pwr_mode;
+static void lora_get_config (lora_cmd_data_t *cmd_data) {
+    cmd_data->info.init.bandwidth = lora_obj.bandwidth;
+    cmd_data->info.init.coding_rate = lora_obj.coding_rate;
+    cmd_data->info.init.frequency = lora_obj.frequency;
+    cmd_data->info.init.preamble = lora_obj.preamble;
+    cmd_data->info.init.rxiq = lora_obj.rxiq;
+    cmd_data->info.init.txiq = lora_obj.txiq;
+    cmd_data->info.init.sf = lora_obj.sf;
+    cmd_data->info.init.tx_power = lora_obj.tx_power;
+    cmd_data->info.init.power_mode = lora_obj.pwr_mode;
 }
 
-static void lora_send_cmd (lora_cmd_rsp_data_t *cmd_rsp_data) {
-    xQueueSend(xCmdQueue, (void *)cmd_rsp_data, (TickType_t)portMAX_DELAY);
-    // block forever until we receive a response back
-    if (xQueueReceive(xRspQueue, cmd_rsp_data, (TickType_t)portMAX_DELAY)) {
-        if (cmd_rsp_data->rsp_u.rsp != E_LORA_CMD_RSP || cmd_rsp_data->rsp_u.info.rsp.result != E_LORA_CMD_OK) {
-            nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
-        }
+static void lora_send_cmd (lora_cmd_data_t *cmd_data) {
+    xQueueSend(xCmdQueue, (void *)cmd_data, (TickType_t)portMAX_DELAY);
+
+    uint32_t result = xEventGroupWaitBits(LoRaEvents,
+                                          LORA_STATUS_COMPLETED | LORA_STATUS_ERROR,
+                                          pdTRUE,   // clear on exit
+                                          pdFALSE,  // do not wait for all bits
+                                          (TickType_t)portMAX_DELAY);
+
+    if (result & LORA_STATUS_ERROR) {
+        nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
     }
 }
 
 static int32_t lora_send (const byte *buf, uint32_t len, uint32_t timeout_ms) {
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_TX;
-    memcpy (cmd_rsp_data.cmd_u.info.tx.data, buf, len);
-    cmd_rsp_data.cmd_u.info.tx.len = len;
-    cmd_rsp_data.cmd_u.info.tx.async = (timeout_ms == 0);
+    cmd_data.cmd = E_LORA_CMD_TX;
+    memcpy (cmd_data.info.tx.data, buf, len);
+    cmd_data.info.tx.len = len;
 
     if (timeout_ms < 0) {
         // blocking mode
@@ -814,20 +909,23 @@ static int32_t lora_send (const byte *buf, uint32_t len, uint32_t timeout_ms) {
     }
 
     // just pass to the LoRa queue
-    if (!xQueueSend(xCmdQueue, (void *)&cmd_rsp_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
+    if (!xQueueSend(xCmdQueue, (void *)&cmd_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
         return 0;
     }
 
     if (timeout_ms != 0) {
-        // block until receiving a response back
-        xQueueReceive(xRspQueue, &cmd_rsp_data, (TickType_t)portMAX_DELAY);
+        xEventGroupWaitBits(LoRaEvents,
+                            LORA_STATUS_COMPLETED | LORA_STATUS_ERROR,
+                            pdTRUE,   // clear on exit
+                            pdFALSE,  // do not wait for all bits
+                            (TickType_t)portMAX_DELAY);
     }
     // return the number of bytes sent
     return len;
 }
 
 static int32_t lora_recv (byte *buf, uint32_t len, int32_t timeout_ms) {
-    lora_rsp_data_t rsp_data;
+    lora_rx_data_t rx_data;
 
     if (timeout_ms < 0) {
         // blocking mode
@@ -843,7 +941,7 @@ static int32_t lora_recv (byte *buf, uint32_t len, int32_t timeout_ms) {
         }
 
         // get the available data
-        memcpy(buf, &lora_partial_rx_packet.data[lora_partial_rx_packet.index], len);
+        memcpy(buf, (void *)&lora_partial_rx_packet.data[lora_partial_rx_packet.index], len);
 
         // update the index and size values
         lora_partial_rx_packet.index += len;
@@ -853,26 +951,24 @@ static int32_t lora_recv (byte *buf, uint32_t len, int32_t timeout_ms) {
         }
         // return the number of bytes received
         return len;
-    } else if (xQueueReceive(xDataQueue, &rsp_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
-        if (rsp_data.rsp == E_LORA_RX_DATA) {
-            // adjust the len
-            if (rsp_data.info.rx.len < len) {
-                len = rsp_data.info.rx.len;
-            }
-
-            // get the available data
-            memcpy(buf, rsp_data.info.rx.data, len);
-
-            // copy the remainder to the partial data buffer
-            int32_t r_len = rsp_data.info.rx.len - len;
-            if (r_len > 0) {
-                memcpy(lora_partial_rx_packet.data, &rsp_data.info.rx.data[len], r_len);
-                lora_partial_rx_packet.size = r_len;
-                lora_partial_rx_packet.index = 0;
-            }
-            // return the number of bytes received
-            return len;
+    } else if (xQueueReceive(xRxQueue, &rx_data, (TickType_t)(timeout_ms / portTICK_PERIOD_MS))) {
+        // adjust the len
+        if (rx_data.len < len) {
+            len = rx_data.len;
         }
+
+        // get the available data
+        memcpy(buf, rx_data.data, len);
+
+        // copy the remainder to the partial data buffer
+        int32_t r_len = rx_data.len - len;
+        if (r_len > 0) {
+            memcpy((void *)lora_partial_rx_packet.data, &rx_data.data[len], r_len);
+            lora_partial_rx_packet.size = r_len;
+            lora_partial_rx_packet.index = 0;
+        }
+        // return the number of bytes received
+        return len;
     }
     // non-blocking sockects do not thrown timeout error
     if (timeout_ms == 0) {
@@ -883,13 +979,11 @@ static int32_t lora_recv (byte *buf, uint32_t len, int32_t timeout_ms) {
 }
 
 static bool lora_rx_any (void) {
-    lora_rsp_data_t rsp_data;
+    lora_rx_data_t rx_data;
     if (lora_partial_rx_packet.size > 0) {
         return true;
-    } else if (xQueuePeek(xDataQueue, &rsp_data, (TickType_t)0)) {
-        if (rsp_data.rsp == E_LORA_RX_DATA) {
-            return true;
-        }
+    } else if (xQueuePeek(xRxQueue, &rx_data, (TickType_t)0)) {
+        return true;
     }
     return false;
 }
@@ -906,48 +1000,42 @@ static bool lora_tx_space (void) {
 
 /// \class LoRa - Semtech SX1272 radio driver
 static mp_obj_t lora_init_helper(lora_obj_t *self, const mp_arg_val_t *args) {
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
-    cmd_rsp_data.cmd_u.info.init.stack_mode = args[0].u_int;
-    lora_validate_mode (cmd_rsp_data.cmd_u.info.init.stack_mode);
+    cmd_data.info.init.stack_mode = args[0].u_int;
+    lora_validate_mode (cmd_data.info.init.stack_mode);
 
-    cmd_rsp_data.cmd_u.info.init.frequency = args[1].u_int;
-    lora_validate_frequency (cmd_rsp_data.cmd_u.info.init.frequency);
+    cmd_data.info.init.frequency = args[1].u_int;
+    lora_validate_frequency (cmd_data.info.init.frequency);
 
-    cmd_rsp_data.cmd_u.info.init.tx_power = args[2].u_int;
-    lora_validate_power (cmd_rsp_data.cmd_u.info.init.tx_power);
+    cmd_data.info.init.tx_power = args[2].u_int;
+    lora_validate_power (cmd_data.info.init.tx_power);
 
-    cmd_rsp_data.cmd_u.info.init.bandwidth = args[3].u_int;
-    lora_validate_bandwidth (cmd_rsp_data.cmd_u.info.init.bandwidth);
+    cmd_data.info.init.bandwidth = args[3].u_int;
+    lora_validate_bandwidth (cmd_data.info.init.bandwidth);
 
-    cmd_rsp_data.cmd_u.info.init.sf = args[4].u_int;
-    lora_validate_sf(cmd_rsp_data.cmd_u.info.init.sf);
+    cmd_data.info.init.sf = args[4].u_int;
+    lora_validate_sf(cmd_data.info.init.sf);
 
-    cmd_rsp_data.cmd_u.info.init.preamble = args[5].u_int;
+    cmd_data.info.init.preamble = args[5].u_int;
 
-    cmd_rsp_data.cmd_u.info.init.coding_rate = args[6].u_int;
-    lora_validate_coding_rate (cmd_rsp_data.cmd_u.info.init.coding_rate);
+    cmd_data.info.init.coding_rate = args[6].u_int;
+    lora_validate_coding_rate (cmd_data.info.init.coding_rate);
 
-    cmd_rsp_data.cmd_u.info.init.power_mode = args[7].u_int;
-    lora_validate_power_mode (cmd_rsp_data.cmd_u.info.init.power_mode);
+    cmd_data.info.init.power_mode = args[7].u_int;
+    lora_validate_power_mode (cmd_data.info.init.power_mode);
 
-    cmd_rsp_data.cmd_u.info.init.txiq = args[8].u_bool;
-    cmd_rsp_data.cmd_u.info.init.rxiq = args[9].u_bool;
+    cmd_data.info.init.txiq = args[8].u_bool;
+    cmd_data.info.init.rxiq = args[9].u_bool;
 
-    cmd_rsp_data.cmd_u.info.init.adr = args[10].u_bool;
-    cmd_rsp_data.cmd_u.info.init.public = args[11].u_bool;
-    cmd_rsp_data.cmd_u.info.init.tx_retries = args[11].u_int;
+    cmd_data.info.init.adr = args[10].u_bool;
+    cmd_data.info.init.public = args[11].u_bool;
+    cmd_data.info.init.tx_retries = args[11].u_int;
 
     // send message to the lora task
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-    xQueueSend(xCmdQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
+    cmd_data.cmd = E_LORA_CMD_INIT;
+    lora_send_cmd(&cmd_data);
 
-    // block forever until we receive a response back
-    if (xQueueReceive(xRspQueue, &cmd_rsp_data, (TickType_t)portMAX_DELAY)) {
-        if (cmd_rsp_data.rsp_u.rsp != E_LORA_CMD_RSP || cmd_rsp_data.rsp_u.info.rsp.result != E_LORA_CMD_OK) {
-            nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
-        }
-    }
     return mp_const_none;
 }
 
@@ -965,7 +1053,7 @@ STATIC const mp_arg_t lora_init_args[] = {
     { MP_QSTR_rx_iq,        MP_ARG_KW_ONLY  | MP_ARG_BOOL,  {.u_bool = false} },
     { MP_QSTR_adr,          MP_ARG_KW_ONLY  | MP_ARG_BOOL,  {.u_bool = false} },
     { MP_QSTR_public,       MP_ARG_KW_ONLY  | MP_ARG_BOOL,  {.u_bool = true} },
-    { MP_QSTR_tx_retries,   MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int = 1} },
+    { MP_QSTR_tx_retries,   MP_ARG_KW_ONLY  | MP_ARG_INT,   {.u_int = 2} },
 };
 STATIC mp_obj_t lora_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_uint_t n_kw, const mp_obj_t *all_args) {
     // parse args
@@ -976,7 +1064,7 @@ STATIC mp_obj_t lora_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_ui
     mp_arg_parse_all(n_args, all_args, &kw_args, MP_ARRAY_SIZE(args), lora_init_args, args);
 
     // setup the object
-    lora_obj_t *self = &lora_obj;
+    lora_obj_t *self = (lora_obj_t *)&lora_obj;
     self->base.type = (mp_obj_t)&mod_network_nic_type_lora;
 
     // give it to the sleep module
@@ -1012,7 +1100,7 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
         { MP_QSTR_auth,           MP_ARG_REQUIRED | MP_ARG_KW_ONLY | MP_ARG_OBJ, },
         { MP_QSTR_timeout,        MP_ARG_KW_ONLY  | MP_ARG_OBJ,                     {.u_obj = mp_const_none} },
     };
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
     // check for the correct lora radio mode
     if (lora_obj.stack_mode != E_LORA_STACK_MODE_LORAWAN) {
@@ -1031,21 +1119,29 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
 
     // get the auth details
     mp_obj_t *auth;
-    mp_buffer_info_t bufinfo_0, bufinfo_1;
+    mp_buffer_info_t bufinfo_0, bufinfo_1, bufinfo_2;
     if (activation == E_LORA_ACTIVATION_OTAA) {
-        mp_obj_get_array_fixed_n(args[1].u_obj, 2, &auth);
-        mp_get_buffer_raise(auth[0], &bufinfo_0, MP_BUFFER_READ);
-        mp_get_buffer_raise(auth[1], &bufinfo_1, MP_BUFFER_READ);
-        config_get_lora_mac(cmd_rsp_data.cmd_u.info.join.otaa.DevEui);
-        memcpy(cmd_rsp_data.cmd_u.info.join.otaa.AppEui, bufinfo_0.buf, sizeof(cmd_rsp_data.cmd_u.info.join.otaa.AppEui));
-        memcpy(cmd_rsp_data.cmd_u.info.join.otaa.AppKey, bufinfo_1.buf, sizeof(cmd_rsp_data.cmd_u.info.join.otaa.AppKey));
+        uint32_t auth_len;
+        mp_obj_get_array(args[1].u_obj, &auth_len, &auth);
+        if (auth_len == 2) {
+            mp_get_buffer_raise(auth[0], &bufinfo_1, MP_BUFFER_READ);
+            mp_get_buffer_raise(auth[1], &bufinfo_2, MP_BUFFER_READ);
+            config_get_lora_mac(cmd_data.info.join.otaa.DevEui);
+        } else {
+            mp_get_buffer_raise(auth[0], &bufinfo_0, MP_BUFFER_READ);
+            memcpy(cmd_data.info.join.otaa.DevEui, bufinfo_0.buf, sizeof(cmd_data.info.join.otaa.DevEui));
+            mp_get_buffer_raise(auth[1], &bufinfo_1, MP_BUFFER_READ);
+            mp_get_buffer_raise(auth[2], &bufinfo_2, MP_BUFFER_READ);
+        }
+        memcpy(cmd_data.info.join.otaa.AppEui, bufinfo_1.buf, sizeof(cmd_data.info.join.otaa.AppEui));
+        memcpy(cmd_data.info.join.otaa.AppKey, bufinfo_2.buf, sizeof(cmd_data.info.join.otaa.AppKey));
     } else {
         mp_obj_get_array_fixed_n(args[1].u_obj, 3, &auth);
         mp_get_buffer_raise(auth[1], &bufinfo_0, MP_BUFFER_READ);
         mp_get_buffer_raise(auth[2], &bufinfo_1, MP_BUFFER_READ);
-        cmd_rsp_data.cmd_u.info.join.abp.DevAddr = mp_obj_int_get_truncated(auth[0]);
-        memcpy(cmd_rsp_data.cmd_u.info.join.abp.NwkSKey, bufinfo_0.buf, sizeof(cmd_rsp_data.cmd_u.info.join.abp.NwkSKey));
-        memcpy(cmd_rsp_data.cmd_u.info.join.abp.AppSKey, bufinfo_1.buf, sizeof(cmd_rsp_data.cmd_u.info.join.abp.AppSKey));
+        cmd_data.info.join.abp.DevAddr = mp_obj_int_get_truncated(auth[0]);
+        memcpy(cmd_data.info.join.abp.NwkSKey, bufinfo_0.buf, sizeof(cmd_data.info.join.abp.NwkSKey));
+        memcpy(cmd_data.info.join.abp.AppSKey, bufinfo_1.buf, sizeof(cmd_data.info.join.abp.AppSKey));
     }
 
     // get the timeout
@@ -1055,16 +1151,9 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
     }
 
     // send a join request message
-    cmd_rsp_data.cmd_u.info.join.activation = activation;
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_JOIN;
-    xQueueSend(xCmdQueue, (void *)&cmd_rsp_data, (TickType_t)portMAX_DELAY);
-
-    // block forever until we receive a response back
-    if (xQueueReceive(xRspQueue, &cmd_rsp_data, (TickType_t)portMAX_DELAY)) {
-        if (cmd_rsp_data.rsp_u.rsp != E_LORA_CMD_RSP || cmd_rsp_data.rsp_u.info.rsp.result != E_LORA_CMD_OK) {
-            nlr_raise(mp_obj_new_exception_msg(&mp_type_OSError, mpexception_os_operation_failed));
-        }
-    }
+    cmd_data.info.join.activation = activation;
+    cmd_data.cmd = E_LORA_CMD_JOIN;
+    lora_send_cmd(&cmd_data);
 
     if (timeout > 0) {
         while (!lora_obj.joined && timeout >= 0) {
@@ -1079,18 +1168,73 @@ STATIC mp_obj_t lora_join(mp_uint_t n_args, const mp_obj_t *pos_args, mp_map_t *
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(lora_join_obj, 1, lora_join);
 
+STATIC mp_obj_t lora_compliance_test(mp_uint_t n_args, const mp_obj_t *args) {
+    // get
+    if (n_args == 1) {
+        static const qstr lora_compliance_info_fields[] = {
+            MP_QSTR_enabled, MP_QSTR_running, MP_QSTR_state, MP_QSTR_tx_confirmed,
+            MP_QSTR_downlink_counter, MP_QSTR_link_check, MP_QSTR_demod_margin,
+            MP_QSTR_nbr_gateways
+        };
+
+        mp_obj_t compliance_tuple[8];
+        compliance_tuple[0] = mp_obj_new_bool(lora_obj.ComplianceTest.Enabled);
+        compliance_tuple[1] = mp_obj_new_bool(lora_obj.ComplianceTest.Running);
+        compliance_tuple[2] = mp_obj_new_int(lora_obj.ComplianceTest.State);
+        compliance_tuple[3] = mp_obj_new_bool(lora_obj.ComplianceTest.IsTxConfirmed);
+        compliance_tuple[4] = mp_obj_new_int(lora_obj.ComplianceTest.DownLinkCounter);
+        compliance_tuple[5] = mp_obj_new_bool(lora_obj.ComplianceTest.LinkCheck);
+        compliance_tuple[6] = mp_obj_new_int(lora_obj.ComplianceTest.DemodMargin);
+        compliance_tuple[7] = mp_obj_new_int(lora_obj.ComplianceTest.NbGateways);
+
+        return mp_obj_new_attrtuple(lora_compliance_info_fields, 8, compliance_tuple);
+    } else {    // set
+        if (mp_obj_is_true(args[1])) {  // enable or disable
+            lora_obj.ComplianceTest.Enabled = true;
+        } else {
+            lora_obj.ComplianceTest.Enabled = false;
+            lora_obj.ComplianceTest.IsTxConfirmed = false;
+            lora_obj.ComplianceTest.DownLinkCounter = 0;
+            lora_obj.ComplianceTest.Running = false;
+
+            // set adr back to its original value
+            MibRequestConfirm_t mibReq;
+            mibReq.Type = MIB_ADR;
+            mibReq.Param.AdrEnable = lora_obj.adr;
+            LoRaMacMibSetRequestConfirm(&mibReq);
+        }
+
+        if (n_args > 2) {
+            // state
+            lora_obj.ComplianceTest.State = mp_obj_get_int(args[2]);
+
+            if (n_args > 3) {
+                // link check
+                if (mp_obj_is_true(args[3])) {
+                    lora_obj.ComplianceTest.LinkCheck = true;
+                } else {
+                    lora_obj.ComplianceTest.LinkCheck = false;
+                }
+            }
+        }
+
+        return mp_const_none;
+    }
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lora_compliance_test_obj, 1, 4, lora_compliance_test);
+
 STATIC mp_obj_t lora_tx_power (mp_uint_t n_args, const mp_obj_t *args) {
     lora_obj_t *self = args[0];
     if (n_args == 1) {
         return mp_obj_new_int(self->tx_power);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint8_t power = mp_obj_get_int(args[1]);
         lora_validate_power(power);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.tx_power = power;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.tx_power = power;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1101,13 +1245,13 @@ STATIC mp_obj_t lora_coding_rate (mp_uint_t n_args, const mp_obj_t *args) {
     if (n_args == 1) {
         return mp_obj_new_int(self->coding_rate);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint8_t coding_rate = mp_obj_get_int(args[1]);
         lora_validate_coding_rate(coding_rate);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.coding_rate = coding_rate;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.coding_rate = coding_rate;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1118,12 +1262,12 @@ STATIC mp_obj_t lora_preamble (mp_uint_t n_args, const mp_obj_t *args) {
     if (n_args == 1) {
         return mp_obj_new_int(self->preamble);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint8_t preamble = mp_obj_get_int(args[1]);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.preamble = preamble;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.preamble = preamble;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1134,13 +1278,13 @@ STATIC mp_obj_t lora_bandwidth (mp_uint_t n_args, const mp_obj_t *args) {
     if (n_args == 1) {
         return mp_obj_new_int(self->bandwidth);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint8_t bandwidth = mp_obj_get_int(args[1]);
         lora_validate_bandwidth(bandwidth);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.bandwidth = bandwidth;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.bandwidth = bandwidth;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1151,13 +1295,13 @@ STATIC mp_obj_t lora_frequency (mp_uint_t n_args, const mp_obj_t *args) {
     if (n_args == 1) {
         return mp_obj_new_int(self->frequency);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint32_t frequency = mp_obj_get_int(args[1]);
         lora_validate_frequency(frequency);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.frequency = frequency;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.frequency = frequency;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1168,13 +1312,13 @@ STATIC mp_obj_t lora_sf (mp_uint_t n_args, const mp_obj_t *args) {
     if (n_args == 1) {
         return mp_obj_new_int(self->sf);
     } else {
-        lora_cmd_rsp_data_t cmd_rsp_data;
+        lora_cmd_data_t cmd_data;
         uint8_t sf = mp_obj_get_int(args[1]);
         lora_validate_sf(sf);
-        lora_get_config (&cmd_rsp_data);
-        cmd_rsp_data.cmd_u.info.init.sf = sf;
-        cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_INIT;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_get_config (&cmd_data);
+        cmd_data.info.init.sf = sf;
+        cmd_data.cmd = E_LORA_CMD_INIT;
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1182,7 +1326,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lora_sf_obj, 1, 2, lora_sf);
 
 STATIC mp_obj_t lora_power_mode(mp_uint_t n_args, const mp_obj_t *args) {
     lora_obj_t *self = args[0];
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
     if (n_args == 1) {
         return mp_obj_new_int(self->pwr_mode);
@@ -1190,12 +1334,12 @@ STATIC mp_obj_t lora_power_mode(mp_uint_t n_args, const mp_obj_t *args) {
         uint8_t pwr_mode = mp_obj_get_int(args[1]);
         lora_validate_power_mode(pwr_mode);
         if (pwr_mode == E_LORA_MODE_ALWAYS_ON) {
-            cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_WAKE_UP;
+            cmd_data.cmd = E_LORA_CMD_WAKE_UP;
         } else {
-            cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_SLEEP;
+            cmd_data.cmd = E_LORA_CMD_SLEEP;
         }
         self->pwr_mode = pwr_mode;
-        lora_send_cmd (&cmd_rsp_data);
+        lora_send_cmd (&cmd_data);
         return mp_const_none;
     }
 }
@@ -1219,9 +1363,8 @@ STATIC mp_obj_t lora_add_channel (mp_uint_t n_args, const mp_obj_t *pos_args, mp
         { MP_QSTR_frequency,    MP_ARG_REQUIRED | MP_ARG_KW_ONLY  | MP_ARG_INT },
         { MP_QSTR_dr_min,       MP_ARG_REQUIRED | MP_ARG_KW_ONLY  | MP_ARG_INT },
         { MP_QSTR_dr_max,       MP_ARG_REQUIRED | MP_ARG_KW_ONLY  | MP_ARG_INT },
-        { MP_QSTR_duty_cycle,   MP_ARG_KW_ONLY  | MP_ARG_INT, {.u_obj = mp_const_none} },
     };
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
     // parse args
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
@@ -1240,18 +1383,13 @@ STATIC mp_obj_t lora_add_channel (mp_uint_t n_args, const mp_obj_t *pos_args, mp
         goto error;
     }
 
-    uint32_t band = args[4].u_int;
-    if (band >= LORA_MAX_NB_BANDS) {
-        goto error;
-    }
-
-    cmd_rsp_data.cmd_u.info.channel.index = index;
-    cmd_rsp_data.cmd_u.info.channel.frequency = frequency;
-    cmd_rsp_data.cmd_u.info.channel.dr_min = dr_min;
-    cmd_rsp_data.cmd_u.info.channel.dr_max = dr_max;
-    cmd_rsp_data.cmd_u.info.channel.add = true;
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_CONFIG_CHANNEL;
-    lora_send_cmd (&cmd_rsp_data);
+    cmd_data.info.channel.index = index;
+    cmd_data.info.channel.frequency = frequency;
+    cmd_data.info.channel.dr_min = dr_min;
+    cmd_data.info.channel.dr_max = dr_max;
+    cmd_data.info.channel.add = true;
+    cmd_data.cmd = E_LORA_CMD_CONFIG_CHANNEL;
+    lora_send_cmd (&cmd_data);
 
     return mp_const_none;
 
@@ -1261,17 +1399,17 @@ error:
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(lora_add_channel_obj, 1, lora_add_channel);
 
 STATIC mp_obj_t lora_remove_channel (mp_obj_t self_in, mp_obj_t idx) {
-    lora_cmd_rsp_data_t cmd_rsp_data;
+    lora_cmd_data_t cmd_data;
 
     uint32_t index = mp_obj_get_int(idx);
     if (index >= LORA_MAX_NB_CHANNELS) {
         nlr_raise(mp_obj_new_exception_msg(&mp_type_ValueError, mpexception_value_invalid_arguments));
     }
 
-    cmd_rsp_data.cmd_u.info.channel.index = index;
-    cmd_rsp_data.cmd_u.info.channel.add = false;
-    cmd_rsp_data.cmd_u.cmd = E_LORA_CMD_CONFIG_CHANNEL;
-    lora_send_cmd (&cmd_rsp_data);
+    cmd_data.info.channel.index = index;
+    cmd_data.info.channel.add = false;
+    cmd_data.cmd = E_LORA_CMD_CONFIG_CHANNEL;
+    lora_send_cmd (&cmd_data);
 
     // return the number of bytes written
     return mp_const_none;
@@ -1301,6 +1439,7 @@ STATIC const mp_map_elem_t lora_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_add_channel),         (mp_obj_t)&lora_add_channel_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_remove_channel),      (mp_obj_t)&lora_remove_channel_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_mac),                 (mp_obj_t)&lora_mac_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_compliance_test),     (mp_obj_t)&lora_compliance_test_obj },
 
     // class constants
     { MP_OBJ_NEW_QSTR(MP_QSTR_LORA),                MP_OBJ_NEW_SMALL_INT(E_LORA_STACK_MODE_LORA) },
@@ -1327,9 +1466,6 @@ STATIC const mp_map_elem_t lora_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_CODING_4_6),          MP_OBJ_NEW_SMALL_INT(E_LORA_CODING_4_6) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_CODING_4_7),          MP_OBJ_NEW_SMALL_INT(E_LORA_CODING_4_7) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_CODING_4_8),          MP_OBJ_NEW_SMALL_INT(E_LORA_CODING_4_8) },
-
-    { MP_OBJ_NEW_QSTR(MP_QSTR_OTAA),                MP_OBJ_NEW_SMALL_INT(E_LORA_ACTIVATION_OTAA) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_ABP),                 MP_OBJ_NEW_SMALL_INT(E_LORA_ACTIVATION_ABP) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(lora_locals_dict, lora_locals_dict_table);
@@ -1348,6 +1484,7 @@ const mod_network_nic_type_t mod_network_nic_type_lora = {
     .n_recv = lora_socket_recv,
     .n_settimeout = lora_socket_settimeout,
     .n_setsockopt = lora_socket_setsockopt,
+    .n_bind = lora_socket_bind,
     .n_ioctl = lora_socket_ioctl,
 };
 
@@ -1365,6 +1502,8 @@ static int lora_socket_socket (mod_network_socket_obj_t *s, int *_errno) {
 #else
     LORAWAN_SOCKET_SET_DR(s->sock_base.sd, DR_4);
 #endif
+    // port #2 is the defualt one
+    LORAWAN_SOCKET_SET_PORT(s->sock_base.sd, 2);
     return 0;
 }
 
@@ -1379,7 +1518,8 @@ static int lora_socket_send (mod_network_socket_obj_t *s, const byte *buf, mp_ui
     mp_int_t n_bytes = -1;
 
     LORA_CHECK_SOCKET(s);
-    // is the radio able to transmi
+
+    // is the radio able to transmit
     if (lora_obj.pwr_mode == E_LORA_MODE_SLEEP) {
         *_errno = ENETDOWN;
     } else if (len > LORA_PAYLOAD_SIZE_MAX) {
@@ -1387,15 +1527,16 @@ static int lora_socket_send (mod_network_socket_obj_t *s, const byte *buf, mp_ui
     } else if (len > 0) {
         if (lora_obj.stack_mode == E_LORA_STACK_MODE_LORA) {
             n_bytes = lora_send (buf, len, s->sock_base.timeout);
-        } else {
+        } else if (lora_obj.joined) {
             n_bytes = lorawan_send (buf, len, s->sock_base.timeout,
                                     LORAWAN_SOCKET_IS_CONFIRMED(s->sock_base.sd),
-                                    LORAWAN_SOCKET_GET_DR(s->sock_base.sd));
+                                    LORAWAN_SOCKET_GET_DR(s->sock_base.sd),
+                                    LORAWAN_SOCKET_GET_PORT(s->sock_base.sd));
         }
         if (n_bytes == 0) {
             *_errno = EAGAIN;
             n_bytes = -1;
-        } else if (n_bytes < 0 || !lora_obj.joined) {
+        } else if (n_bytes < 0) {
             *_errno = ENETUNREACH;
         }
     }
@@ -1415,7 +1556,7 @@ static int lora_socket_recv (mod_network_socket_obj_t *s, byte *buf, mp_uint_t l
 static int lora_socket_setsockopt(mod_network_socket_obj_t *s, mp_uint_t level, mp_uint_t opt, const void *optval, mp_uint_t optlen, int *_errno) {
     LORA_CHECK_SOCKET(s);
     if (level != SOL_LORA) {
-        *_errno = ENOPROTOOPT;
+        *_errno = EOPNOTSUPP;
         return -1;
     }
 
@@ -1426,13 +1567,13 @@ static int lora_socket_setsockopt(mod_network_socket_obj_t *s, mp_uint_t level, 
             LORAWAN_SOCKET_CLR_CONFIRMED(s->sock_base.sd);
         }
     } else if (opt == SO_LORAWAN_DR) {
-        if (!lora_validate_data_rate(*(uint8_t *)optval)) {
-            *_errno = ENOPROTOOPT;
+        if (!lora_validate_data_rate(*(uint32_t *)optval)) {
+            *_errno = EOPNOTSUPP;
             return -1;
         }
         LORAWAN_SOCKET_SET_DR(s->sock_base.sd, *(uint8_t *)optval);
     } else {
-        *_errno = ENOPROTOOPT;
+        *_errno = EOPNOTSUPP;
         return -1;
     }
     return 0;
@@ -1441,6 +1582,16 @@ static int lora_socket_setsockopt(mod_network_socket_obj_t *s, mp_uint_t level, 
 static int lora_socket_settimeout (mod_network_socket_obj_t *s, mp_int_t timeout_ms, int *_errno) {
     LORA_CHECK_SOCKET(s);
     s->sock_base.timeout = timeout_ms;
+    return 0;
+}
+
+static int lora_socket_bind(mod_network_socket_obj_t *s, byte *ip, mp_uint_t port, int *_errno) {
+    LORA_CHECK_SOCKET(s);
+    if (port > 224) {
+        *_errno = EOPNOTSUPP;
+        return -1;
+    }
+    LORAWAN_SOCKET_SET_PORT(s->sock_base.sd, port);
     return 0;
 }
 

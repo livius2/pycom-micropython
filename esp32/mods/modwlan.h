@@ -54,7 +54,8 @@ typedef struct _wlan_obj_t {
     uint8_t             bssid[6];
     uint8_t             irq_flags;
     bool                irq_enabled;
-    bool                servers_enabled;
+    bool                enable_servers;
+    bool                disconnected;
 } wlan_obj_t;
 
 /******************************************************************************
